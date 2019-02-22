@@ -21,16 +21,16 @@ Set up and load packages.
 Set options.
 ```{r}
   opt <- list()
-  opt$datasets <- c('CCLE','GDSC','gCSI','FIMM') # CCLE GDSC GDSC1000 gCSI FIMM
+  opt$datasets <- c('CCLE','GDSC','FIMM','gCSI') # CCLE GDSC GDSC1000 gCSI FIMM
   opt$min_intersection <- 2 # Minimum number of studies a drug/cell must be assayed in to be included in the intersection comparison
-  opt$log_dir <- paste(paste(opt$datasets,collapse='_'),'fit_eb',sep='_')
+  opt$log_dir <- paste(paste(opt$datasets,collapse='_'),'fit_null',sep='_')
   opt$sensitivity_measure <- c('auc_recomputed') # raw_auc e_inf hill_slope ec50 auc_recomputed
   opt$use_small_datasets <- FALSE
   # Prior specifications denoting cell sensitivity and proportion of drugs broadly-active:
   opt$prior.sensitive <- .3 # prior specification denoting cell is sensitive if greater than this value
   opt$prior.broadly.active <- .05 # prior specification denoting drug is broadly-active if probability cell is sensitive is greater than value
   opt$level.one.flat.prior <- FALSE # should assignments using these \thresholds be random? 
-  opt$level.two.empirical <- TRUE # should prior distributions for drug types and individual drugs be fit empirically? 
+  opt$level.two.empirical <- FALSE # should prior distributions for drug types and individual drugs be fit empirically? 
   # If level.two.empirical is FALSE, then specify params below: 
   opt$targeted.alpha.prior <- 1 # prior for alpha in beta distribution for targeted drug probability of sensitivity
   opt$targeted.beta.prior <- 10 # prior for beta in beta distribution for targeted drug probability of sensitivity
@@ -86,6 +86,9 @@ Repeat but for the intersection.
                                                   remove_noisy_curves = FALSE,
                                                   remove_mislabelled_cells = FALSE)
   eval(parse(text=paste('rm(',paste(opt$datasets,collapse=','),')',sep='')))
+  intersection.tibble.list <- lapply(intersection.tibble.list, function(ii) {
+    ii %>% group_by(drug,cell,measure) %>% filter(n_distinct(experiment) >= opt$min_intersection) %>% ungroup()
+  })
 ```
 
 Plot the distribution of each measure for the intersection.
@@ -284,35 +287,6 @@ Plot the pairwise concordance between two studies at a time.
   }
 ```
 
-Functions to calculate the MLEs.
-```{r}
-  library(VGAM)
-  fit_bb_mle <- function(x, n) {
-    ll <- function(alpha, beta) {
-      -sum(dbetabinom.ab(x, n, alpha, beta, log = TRUE))
-    }
-    m <- try({
-      stats4::mle(ll, start = list(alpha = 3, beta = 10), method = "L-BFGS-B",
-                     lower = c(0.001, .001))
-    }, silent=TRUE)
-    if (class(m) == "try-error") {
-      ab <- c(1e-2,1e-2)
-    } else {
-      ab <- stats4::coef(m)
-    }
-    data_frame(alpha = ab[1], beta = ab[2], number = length(x))
-  }
-  fit_beta_mle <- function(x) {
-    ll <- function(alpha, beta) {
-      -sum(dbeta(x, alpha, beta, log = TRUE))
-    }
-    m <- stats4::mle(ll, start = list(alpha = 3, beta = 10), method = "L-BFGS-B",
-                     lower = c(0.001, .001))
-    ab <- stats4::coef(m)
-    data_frame(alpha = ab[1], beta = ab[2], number = length(x))
-  }
-```
-
 Initialize drug and cell assignments for EM using prior specifications for probability sensitive and probability drug is broadly active. Or use a flat prior (random initialization).
 ```{r}
   if (opt$level.one.flat.prior) {
@@ -460,105 +434,6 @@ Smoothed density of the prior pi across all studies.
         scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density')
     ggsave(p, file=file.path(opt$log_dir,meas,paste('p_prior_smoothed.pdf',sep='')),width = 4, height = 4, units = "in",limitsize=FALSE)
     saveRDS(p, file=file.path(opt$log_dir,meas,paste('p_prior_smoothed.RDS',sep='')))
-  }
-```
-
-EM function definition.
-```{r}
-  library(purrr)
-  iterate_em <- function(state, ...) {
-    # M-step for drug-type parameters
-    drug_types <- state$drug_assignments %>%
-      group_by(drug_type) %>%
-      do(mutate(fit_bb_mle(.$sensitive, .$cell_count), number = nrow(.))) %>%
-      ungroup() %>%
-      mutate(prior = number / sum(number))
-    
-    # E-step for drug types
-    drug_assignments <- drug_assignments %>%
-      select(drug:cell_count) %>%
-      crossing(drug_types) %>%
-      mutate(likelihood = prior * VGAM::dbetabinom.ab(sensitive, cell_count, alpha, beta)) %>%
-      group_by(drug) %>%
-      mutate(posterior=likelihood/sum(likelihood)) %>%
-      top_n(1, likelihood) %>%
-      ungroup()
-    
-    # M-step for drug-specific parameters (targetted)
-    targetted_drug_fits_temp <- state$cell_assignments %>%
-      mutate(x=round(value*1e3),n=1e3) %>%
-      select(-drug_type) %>%
-      left_join(drug_assignments %>% select(drug,drug_type), by='drug') %>%
-      filter(drug_type == 'targeted') %>%
-      group_by(drug, cell_type, drug_type) %>%
-      do(mutate(fit_bb_mle(.$x, .$n),number = nrow(.))) %>%
-      group_by(drug) %>%
-      mutate(ndist=n_distinct(cell_type)) %>%
-      ungroup()
-    targetted_drug_fits <- targetted_drug_fits_temp %>%
-        bind_rows(
-          targetted_drug_fits_temp %>% 
-            filter(ndist<2) %>% 
-            mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
-                   cell_type=cell_type2,
-                   number=0,
-                   alpha=case_when(cell_type == 'resistant' ~ opt$resistant.alpha.prior,
-                                   cell_type == 'sensitive' ~ opt$sensitive.alpha.prior),
-                   beta=case_when(cell_type == 'resistant' ~ opt$resistant.beta.prior,
-                                  cell_type == 'sensitive' ~ opt$sensitive.beta.prior)) %>%
-            select(-cell_type2)
-        ) %>%
-        group_by(drug) %>%       
-        mutate(prior = number / sum(number)) %>%
-        ungroup() %>% 
-        select(-ndist)
-    
-    # M-step for drug-specific parameters (broad)
-    broad_drug_fits <- state$cell_assignments %>%
-      mutate(x=ifelse(value==0,1e-3,value)) %>%
-      select(-drug_type) %>%
-      left_join(drug_assignments %>% select(drug,drug_type), by='drug') %>%
-      filter(drug_type == 'broad') %>%
-      group_by(drug, drug_type) %>%
-      do(mutate(fit_beta_mle(.$x),number = nrow(.))) %>%
-      ungroup() %>%
-      mutate(prior = 1)
-    drug_fits <- bind_rows(targetted_drug_fits,broad_drug_fits)
-    
-    # E-step for cell types (targetted drugs)
-    targetted_drug_list <- unique(targetted_drug_fits$drug)
-    targetted_cell_assignments <- lapply(targetted_drug_list, function(dr) {
-      cell_assignments %>%
-        filter(drug == dr) %>%
-        select(drug:drug_type) %>%
-        mutate(drug_type='targeted') %>%
-        mutate(x=round(value*1e3),n=1e3) %>%
-        crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type)) %>%
-        mutate(likelihood = prior * VGAM::dbetabinom.ab(x, n, alpha, beta)) %>%
-        group_by(drug, cell) %>%
-        mutate(posterior=likelihood/sum(likelihood)) %>%
-        top_n(1, likelihood) %>%
-        ungroup()
-    })
-    targetted_cell_assignments <- do.call(bind_rows, targetted_cell_assignments)
-    
-    # E-step for cell types (broad drugs)
-    broad_drug_list <- unique(broad_drug_fits$drug)
-    broad_cell_assignments <- cell_assignments %>%
-        filter(drug %in% broad_drug_list) %>%
-        select(drug:drug_type) %>%
-      mutate(drug_type='broad') %>%  
-      mutate(x=ifelse(value==0,1e-3,value)) %>%
-        left_join(broad_drug_fits, by=c('drug','drug_type')) %>%
-        mutate(likelihood = 1 * dbeta(x, alpha, beta),
-               x=x*1e3,n=1e3,cell_type = ifelse(value>=qbeta(.95,.$alpha,.$beta),'sensitive','resistant'),
-               posterior = pbeta(.$value,.$alpha,.$beta,lower.tail = FALSE))
-    cell_assignments <- bind_rows(targetted_cell_assignments,broad_cell_assignments)
-    
-    list(drug_assignments = drug_assignments,
-         drug_types = drug_types,
-         cell_assignments = cell_assignments,
-         drug_fits = drug_fits)
   }
 ```
 
@@ -1187,7 +1062,7 @@ for (comp in names(intersection.fitted.list)) {
                 (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))))) %>%
       ggplot(aes_string(x=paste(combos[combo,1],'value',sep='_'),
                         y=paste(combos[combo,2],'value',sep='_'))) + 
-      geom_point(aes(color=agreement),alpha=1,size=2) + 
+      geom_point(aes(color=agreement),alpha=.7,size=2) + 
       scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) + 
       theme_bw() + 
       ggtitle(paste(dr,'Posterior Agreement')) +
@@ -1374,7 +1249,6 @@ saveRDS(object=pairwise_study_agreements,file=file.path(opt$log_dir,'pairwise_st
 
 Plot pairwise correlations between sensitivity measures across drugs.
 ```{r}
-library(ggrepel)
 for (comp in names(intersection.fitted.list)) {
   combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
   for (combo in 1:nrow(combos)) {

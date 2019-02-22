@@ -56,7 +56,9 @@ p3 <- readRDS('Figs/Fig1/Spearman_Pearson_CCLE_GDSC.RDS') +
 p4 <- readRDS('Figs/Fig1/17-AAG_posterior_CCLE_GDSC.RDS') + 
   theme(legend.position = c(.1,.65), plot.title=element_blank()) +
   theme(axis.title = element_text(size = 14),
-        axis.text = element_text(size = 12))
+        axis.text = element_text(size = 12)) +
+  scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) 
+
 p5 <- readRDS('Figs/Fig1/CCLE/17-AAG.RDS') + 
   theme(plot.title=element_blank(),
         axis.title = element_blank(),
@@ -102,7 +104,8 @@ p2_2 <- readRDS('Figs/Fig2/Nilotinib_posterior_CCLE_GDSC.RDS') +
   theme(axis.title = element_text(size = 14),
         axis.text = element_text(size = 12)) +
   geom_hline(aes(yintercept=.4),lty=2,lwd=.8,alpha=.5) +
-  geom_vline(aes(xintercept=.4),lty=2,lwd=.8,alpha=.5)
+  geom_vline(aes(xintercept=.4),lty=2,lwd=.8,alpha=.5) + 
+  scale_colour_gradient2(midpoint=.975,limits = c(.95,1),mid='grey50',breaks=c(0.95,1),labels=c(0.95,1)) 
 p2_3 <- readRDS('Figs/Fig2/CCLE/Nilotinib.RDS') + 
   theme(plot.title=element_blank(),
         axis.title = element_blank(),
@@ -131,6 +134,12 @@ ggsave('Figs/Figure_2.pdf',width=12,height=6)
 
 p3 <- p3 + theme(plot.title = element_blank())
 p2_1 <- p2_1 + theme(plot.title = element_blank())
+p2_4$layers[[2]]$data <- p2_4$layers[[2]]$data %>% 
+  mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) %>% 
+  filter((cell_type=='resistant' & value<.5) | (cell_type=='sensitive' & value>.5))
+p2_3$layers[[2]]$data <- p2_3$layers[[2]]$data %>% 
+  mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) %>% 
+  filter((cell_type=='resistant' & value<.5) | (cell_type=='sensitive' & value>.5))
 
 ggdraw() +
   draw_plot(p1, 0, .7, .3, .3) +
@@ -211,6 +220,7 @@ p2 <- readRDS('Figs/Fig4/ccle/TAE684_qq.RDS')  +
   scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
   scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) + 
   scale_color_brewer(palette = 'Dark2')
+p2$layers[[3]]$aes_params$size <- 3
 p3 <- readRDS('Figs/Fig4/TAE684_posterior_CCLE_GDSC.RDS')  + 
   theme(axis.title = element_text(size = 14),
         axis.text = element_text(size = 12),
@@ -219,7 +229,8 @@ p3 <- readRDS('Figs/Fig4/TAE684_posterior_CCLE_GDSC.RDS')  +
   ggtitle(label='TAE684 Posterior Agreement') +
   scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
   scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) + 
-  scale_fill_brewer(palette = 'Dark2')
+  scale_fill_brewer(palette = 'Dark2') + 
+  scale_colour_gradient2(midpoint=.975,limits = c(.95,1),mid='grey50',breaks=c(0.95,1),labels=c(0.95,1)) 
 p4 <- readRDS('Figs/Fig4/gdsc/TAE684.RDS')  + 
   facet_wrap(vars(experiment)) + 
   theme(axis.title = element_text(size = 14),
@@ -238,6 +249,7 @@ p5 <- readRDS('Figs/Fig4/gdsc/TAE684_qq.RDS') +
   scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
   scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) + 
   scale_color_brewer(palette = 'Dark2')
+p5$layers[[3]]$aes_params$size <- 3
 p6 <- readRDS('Figs/Fig4/ccle/paclitaxel.RDS') + 
   facet_wrap(vars(experiment)) + 
   theme(axis.title = element_text(size = 14),
@@ -256,6 +268,7 @@ p7 <- readRDS('Figs/Fig4/ccle/paclitaxel_qq.RDS') +
   scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
   scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) + 
   scale_color_brewer(palette = 'Dark2')
+p7$layers[[3]]$aes_params$size <- 3
 p8 <- readRDS('Figs/Fig4/paclitaxel_posterior_CCLE_GDSC.RDS')  + 
   theme(axis.title = element_text(size = 14),
         axis.text = element_text(size = 12),
@@ -283,6 +296,15 @@ p10 <- readRDS('Figs/Fig4/gdsc/paclitaxel_qq.RDS') +
   scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
   scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) + 
   scale_color_brewer(palette = 'Dark2')
+p10$layers[[3]]$aes_params$size <- 3
+
+
+p1$layers[[2]]$data <- p1$layers[[2]]$data %>% 
+  mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) %>% 
+  filter((cell_type=='resistant' & value<.5) | (cell_type=='sensitive' & value>.5))
+p4$layers[[2]]$data <- p4$layers[[2]]$data %>% 
+  mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) %>% 
+  filter((cell_type=='resistant' & value<.5) | (cell_type=='sensitive' & value>.5))
 
 ggdraw() +
   draw_plot(p1, 0, .7, .22, .28) +
@@ -354,3 +376,8 @@ ggdraw() +
   draw_plot_label(c("(a)", "(b)","(c)","(d)"), c(0,.55,0,.56), c(1,1,.5,.5), size = 14) 
 ggsave('Figs/Figure_5.pdf',width=12,height=8.5)
 ```
+
+```{r}
+
+```
+

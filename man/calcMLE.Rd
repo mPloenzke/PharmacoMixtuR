@@ -7,7 +7,11 @@
 calcMLE(sensitivity.tibb, drug.names = NULL, fit = "normal")
 }
 \arguments{
-\item{fit}{}
+\item{drug.names}{List of drugs to fit model to}
+
+\item{fit}{Return MLE for beta or normal distribution}
+
+\item{sensitivitiy.tibb}{Tibble containing sensitivity information, drugs, and cells}
 }
 \value{
 List of tibbles; one containing posterior estimates and one containing estimated parameters

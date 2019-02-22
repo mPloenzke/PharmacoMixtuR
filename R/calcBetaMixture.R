@@ -3,9 +3,9 @@
 #' A wrapper to return the sensitivity information for the
 #' intersected PSets across cells and drugs.
 #'
-#' @param sensitivitiy.tibb
-#' @param drug.names
-#' @param prior_proportion
+#' @param sensitivitiy.tibb Tibble containing sensitivity information, drugs, and cells
+#' @param drug.names List of drugs to fit model to 
+#' @param prior_proportion Proportion of cells believed to be sensitive, per drug, to use as a prior
 #'
 #' @return List of tibbles; one containing posterior estimates and one containing estimated parameters
 #'

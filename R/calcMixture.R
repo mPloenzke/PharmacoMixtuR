@@ -3,10 +3,10 @@
 #' A wrapper to return the sensitivity information for the
 #' intersected PSets across cells and drugs.
 #'
-#' @param sensitivitiy.tibb
-#' @param drug.names
-#' @param prior_proportion
-#' @param sd_na_val
+#' @param sensitivitiy.tibb Tibble containing sensitivity information, drugs, and cells
+#' @param drug.names List of drugs to fit model to 
+#' @param prior_proportion Proportion of cells believed to be sensitive, per drug, to use as a prior
+#' @param sd_na_val Avoid collapsing SD by setting poserior SD to this value
 #'
 #' @return List of tibbles; one containing posterior estimates and one containing estimated parameters
 #'

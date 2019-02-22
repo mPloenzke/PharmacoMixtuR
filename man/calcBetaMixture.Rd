@@ -8,7 +8,11 @@ calcBetaMixture(sensitivity.tibb, drug.names = NULL,
   prior_proportion = 0.8)
 }
 \arguments{
-\item{prior_proportion}{}
+\item{drug.names}{List of drugs to fit model to}
+
+\item{prior_proportion}{Proportion of cells believed to be sensitive, per drug, to use as a prior}
+
+\item{sensitivitiy.tibb}{Tibble containing sensitivity information, drugs, and cells}
 }
 \value{
 List of tibbles; one containing posterior estimates and one containing estimated parameters
