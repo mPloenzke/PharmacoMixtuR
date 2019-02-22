@@ -1,0 +1,163 @@
+---
+title: "Plot dose response curves"
+author: "Matt Ploenzke"
+date: "9/12/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+Options and packages.
+```{r setup, include=FALSE}
+rm(list=ls(all=TRUE))
+knitr::opts_chunk$set(echo = TRUE)
+library(PharmacoGx)
+library(tidyverse)
+theme_set(theme_bw())
+dir.create('dose_response_curves')
+```
+
+Function definitions.
+```{r}
+  GetSupportVec <- function(x, output_length = 1001) {return(seq(from = min(x), to = max(x), length.out = output_length))}
+  Hill <- function(x, pars) {return(pars[2] + (1 - pars[2]) / (1 + (10 ^ x / 10 ^ pars[3]) ^ pars[1]))}
+```
+
+First download the full datasets.
+```{r,eval=FALSE}
+  PharmacoGx::availablePSets()
+  for (dataset in opt$datasets) {
+    PharmacoGx::downloadPSet(dataset)
+  }
+```
+
+Find common cells and drugs CCLE and GDSC.
+```{r}
+load(file.path('../PSets','CCLE.RData'))
+load(file.path('../PSets','GDSC.RData'))
+genes <- intersect(fNames(GDSC, "rna"),fNames(CCLE,"rna"))
+common <- intersectPSet(list('CCLE'=CCLE,'GDSC'=GDSC),intersectOn=c("cell.lines", "drugs"), strictIntersect=TRUE)
+drugs <- drugNames(common[[1]])
+cells <- intersectList(phenoInfo(common$CCLE, "rna")$cellid,
+                         phenoInfo(common$GDSC, "rna2")$cellid,
+                         unique(sensitivityInfo(common$CCLE)$cellid), 
+                         unique(sensitivityInfo(common$GDSC)$cellid))
+ccle.gdsc <- intersectPSet(pSets = list("CCLE"=common$CCLE, "GDSC"=common$GDSC), intersectOn = c("cell.lines", "drugs"), cells=cells)
+```
+
+Dose-response curves CCLE.
+```{r,eval=FALSE}
+sens.info <- as_tibble(ccle.gdsc$CCLE@sensitivity$info) %>%
+  filter(drugid %in% drugs,
+         cellid %in% cells)
+concentrations <- sens.info %>% 
+  filter(row_number()==1) %>%
+  select(-cellid,-drugid,-nbr.conc.tested,-duration_h) %>%
+  gather() %>%
+  pull()
+sens.curves <-  rownames_to_column(as.data.frame(ccle.gdsc$CCLE@sensitivity$raw)) %>%
+  as_tibble() %>% 
+  separate(rowname,into=c('cellid','drugid'),sep='_') %>%
+  filter(drugid %in% drugs,
+         cellid %in% cells)
+dir.create(file.path('dose_response_curves','CCLE')) 
+for (dr in drugs) {
+  drug.curves <- sens.curves %>% 
+    filter(drugid==dr)
+  for (ce in unique(drug.curves$cellid)) {
+    tdat <- drug.curves %>%
+      filter(cellid == ce) %>%
+      select(ends_with('Viability')) %>% 
+      gather() %>%
+      mutate(concentrations = concentrations,
+             group=1,
+             value = as.numeric(value),
+             islarge = ifelse(value>100,1,ifelse(value<0,5,19)))
+    fit1 <- logLogisticRegression(conc=tdat$concentrations,viability=tdat$value,
+                                    conc_as_log = FALSE,family='normal',trunc=TRUE)
+    log10_x_vals_1 <- GetSupportVec(log10(tdat$concentrations))
+    yy1 <- Hill(log10_x_vals_1, pars = c(fit1$HS,
+                                         fit1$E_inf/100, 
+                                         log10(fit1$EC50))) * 100
+    preds1 <- Hill(log10(tdat$concentrations),pars = c(fit1$HS,
+                                                       fit1$E_inf/100, 
+                                                        log10(fit1$EC50))) * 100
+    preddat <- tibble(value=yy1,concentrations=10^log10_x_vals_1,group=1)
+    p <- tdat %>%
+      ggplot(aes(x=concentrations,y=value)) +
+        geom_point(shape=tdat$islarge) +
+        geom_line(data=preddat,aes(x=concentrations,y=value,group=1),show.legend=FALSE) + 
+        geom_vline(data=as.tibble(fit1),aes(xintercept=EC50),lty=2,lwd=.8,alpha=.5) +
+        geom_hline(data=as.tibble(fit1),aes(yintercept=E_inf),lty=2,lwd=.8,alpha=.5) + 
+        scale_x_continuous(trans='log10') + 
+        labs(y = "Relative cell viability",
+             x = expression(paste("Dose Concentration (", log10, " ", mu, "M)",sep=''))) + 
+        scale_y_continuous(limits=c(ifelse(min(tdat$value)<0,min(tdat$value),0),
+                                    ifelse(max(tdat$value)>100,max(tdat$value),100)),
+                           breaks=seq(0,100,by=20)) + 
+      ggtitle(paste('CCLE - Compound:', dr,sep=' '),subtitle = paste('Cell ID:',ce,sep=' '))
+    ggsave(plot = p,filename = file.path('dose_response_curves','CCLE',paste(dr,'_',ce,'.pdf',sep='')))
+    saveRDS(p,file.path('dose_response_curves','CCLE',paste(dr,'_',ce,'.RDS',sep='')))
+  }
+}
+```
+
+Dose-response curves GDSC
+```{r,eval=FALSE}
+sens.info <- as_tibble(ccle.gdsc$GDSC@sensitivity$info) %>%
+  filter(drugid %in% drugs,
+         cellid %in% cells)
+sens.curves <-  rownames_to_column(as.data.frame(ccle.gdsc$GDSC@sensitivity$raw)) %>%
+  as_tibble() %>% 
+  separate(rowname,into=c('cellid','drugid'),sep='_') %>%
+  filter(drugid %in% drugs,
+         cellid %in% cells)
+concentrations <- sens.curves %>% 
+  filter(row_number()==1) %>%
+  select(ends_with('Dose')) %>%
+  gather() %>%
+  pull() %>%
+  as.numeric()
+dir.create(file.path('dose_response_curves','GDSC')) 
+for (dr in drugs) {
+  drug.curves <- sens.curves %>% 
+    filter(drugid==dr)
+  for (ce in unique(drug.curves$cellid)) {
+    tdat <- drug.curves %>%
+      filter(cellid == ce) %>%
+      select(ends_with('Viability')) %>% 
+      gather() %>%
+      mutate(concentrations = concentrations,
+             group=1,
+             value = as.numeric(value),
+             islarge = ifelse(value>100,1,ifelse(value<0,5,19)))
+    fit1 <- logLogisticRegression(conc=tdat$concentrations,viability=tdat$value,
+                                    conc_as_log = FALSE,family='normal',trunc=TRUE)
+    log10_x_vals_1 <- GetSupportVec(log10(tdat$concentrations))
+    yy1 <- Hill(log10_x_vals_1, pars = c(fit1$HS,
+                                         fit1$E_inf/100, 
+                                         log10(fit1$EC50))) * 100
+    preds1 <- Hill(log10(tdat$concentrations),pars = c(fit1$HS,
+                                                       fit1$E_inf/100, 
+                                                        log10(fit1$EC50))) * 100
+    preddat <- tibble(value=yy1,concentrations=10^log10_x_vals_1,group=1)
+    p <- tdat %>%
+      ggplot(aes(x=concentrations,y=value)) +
+        geom_point(shape=tdat$islarge) +
+        geom_line(data=preddat,aes(x=concentrations,y=value,group=1),show.legend=FALSE) + 
+        geom_vline(aes(xintercept=fit1$EC50),lty=2,lwd=.8,alpha=.5) +
+        geom_hline(aes(yintercept=fit1$E_inf),lty=2,lwd=.8,alpha=.5) + 
+        scale_x_continuous(trans='log10') + 
+        labs(y = "Cell Viability",
+             x = expression(paste("Dose Concentration (", log10, " ", mu, "M)",sep=''))) + 
+        scale_y_continuous(limits=c(ifelse(min(tdat$value)<0,min(tdat$value),0),
+                                    ifelse(max(tdat$value)>100,max(tdat$value),100)),
+                           breaks=seq(0,100,by=20)) + 
+      ggtitle(paste('GDSC - Compound:', dr,sep=' '),subtitle = paste('Cell ID:',ce,sep=' '))
+    ggsave(plot = p, filename = file.path('dose_response_curves','GDSC',paste(dr,'_',ce,'.pdf',sep='')))
+    saveRDS(p,file.path('dose_response_curves','GDSC',paste(dr,'_',ce,'.RDS',sep='')))
+  }
+}
+```

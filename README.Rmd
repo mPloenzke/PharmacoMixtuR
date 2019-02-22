@@ -1,0 +1,31 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-"
+)
+```
+
+# tidyPharmaco
+
+[tidyPharmaco](https://github.com/mPloenzke/tidyPharmaco) 
+
+## Installation
+
+Begin by installing tidyPharmaco from github with:
+
+```{r gh-installation, eval = FALSE}
+# install.packages("devtools")
+devtools::install_github("mPloenzke/tidyPharmaco")
+```
+
+## Getting Started
+
+To get started, please read the intro vignettes: `vignette("plot_DoseResponse_Curves", package = "tidyPharmaco")`, `vignette("corr_v_OR", package = "tidyPharmaco")`, `vignette("calculate_Posterior", package = "tidyPharmaco")`.
+
