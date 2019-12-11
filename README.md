@@ -1,21 +1,22 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
-tidyPharmaco
-============
 
-[tidyPharmaco](https://github.com/mPloenzke/tidyPharmaco)
+# PharmacoMixtuR
 
-Installation
-------------
+[PharmacoMixtuR](https://github.com/mPloenzke/PharmacoMixtuR)
 
-Begin by installing tidyPharmaco from github with:
+## Installation
+
+Begin by installing PharmacoMixR from github with:
 
 ``` r
 # install.packages("devtools")
-devtools::install_github("mPloenzke/tidyPharmaco")
+devtools::install_github("mPloenzke/PharmacoMixtuR")
 ```
 
-Getting Started
----------------
+## Getting Started
 
-To get started, please read the intro vignettes: `vignette("plot_DoseResponse_Curves", package = "tidyPharmaco")`, `vignette("corr_v_OR", package = "tidyPharmaco")`, `vignette("calculate_Posterior", package = "tidyPharmaco")`.
+To get started, please read the intro vignettes:
+`vignette("plot_DoseResponse_Curves", package = "PharmacoMixtuR")`,
+`vignette("corr_v_OR", package = "PharmacoMixtuR")`,
+`vignette("calculate_Posterior", package = "PharmacoMixtuR")`.
