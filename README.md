@@ -7,7 +7,7 @@
 
 ## Installation
 
-Begin by installing PharmacoMixR from github with:
+Begin by installing PharmacoMixtuR from github with:
 
 ``` r
 # install.packages("devtools")
