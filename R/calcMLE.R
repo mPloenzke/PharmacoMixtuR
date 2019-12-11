@@ -102,11 +102,21 @@ fit_bb_mle <- function(x, n) {
 #' @importFrom stats dbeta
 #' @importFrom stats4 mle coef
 fit_beta_mle <- function(x) {
+  
   ll <- function(alpha, beta) {
-    -sum(dbeta(x, alpha, beta, log = TRUE))
+    -sum(dbeta(x2, alpha, beta, log = TRUE))
   }
-  m <- stats4::mle(ll, start = list(alpha = 3, beta = 10), method = "L-BFGS-B",
-                   lower = c(0.001, .001))
-  ab <- stats4::coef(m)
+  if (length(x) == 1) {
+    x2 <- c(x, x+rnorm(1,0,sd=.05))
+  } else {
+    x2 <- x
+  }
+  m <- try(stats4::mle(ll, start = list(alpha = 3, beta = 10), method = "L-BFGS-B",
+                   lower = c(0.001, .001)),silent=TRUE)
+  if (class(m) == "try-error") {
+    ab <- c(1e-2,1e-2)
+  } else {
+    ab <- stats4::coef(m)
+  }
   data_frame(alpha = ab[1], beta = ab[2], number = length(x))
 }

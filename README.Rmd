@@ -18,14 +18,14 @@ knitr::opts_chunk$set(
 
 ## Installation
 
-Begin by installing tidyPharmaco from github with:
+Begin by installing PharmacoMixR from github with:
 
 ```{r gh-installation, eval = FALSE}
 # install.packages("devtools")
-devtools::install_github("mPloenzke/tidyPharmaco")
+devtools::install_github("mPloenzke/PharmacoMixtuR")
 ```
 
 ## Getting Started
 
-To get started, please read the intro vignettes: `vignette("plot_DoseResponse_Curves", package = "tidyPharmaco")`, `vignette("corr_v_OR", package = "tidyPharmaco")`, `vignette("calculate_Posterior", package = "tidyPharmaco")`.
+To get started, please read the intro vignettes: `vignette("plot_DoseResponse_Curves", package = "PharmacoMixtuR")`, `vignette("corr_v_OR", package = "PharmacoMixtuR")`, `vignette("calculate_Posterior", package = "PharmacoMixtuR")`.
 

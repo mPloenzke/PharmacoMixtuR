@@ -1,0 +1,425 @@
+---
+title: "Untitled"
+author: "Matt Ploenzke"
+date: "11/20/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Packages.
+```{r}
+library(tidyverse)
+library(ggrepel)
+library(magrittr)
+```
+
+Load correlations between estimated effect sizes.
+```{r}
+CCLE_GDSC <- read_csv('../../CCLE_GDSC1000_gCSI_CTRPv2_FIMM_biomarkers_rna/correlations.csv')
+```
+
+Correlation between effect sizes comparison.
+```{r}
+CCLE_GDSC %>%
+  filter(Method=='Continuous',Comparison == 'GDSC_CCLE') %>%
+  select(-adj.P.Val_correlation) %>%
+  spread(Measure, logFC_correlation) %>%
+  mutate(color = case_when(Posterior-AAC>0 ~ 'blue',
+                           Posterior==AAC ~' grey',
+                           Posterior<AAC ~ 'red')) %>%
+  ggplot(aes(x=AAC,y=Posterior,label=Drug, color=color)) + 
+  geom_point() + 
+  geom_abline(aes(slope=1,intercept=0),lty=2) + 
+  geom_hline(aes(yintercept=0), color='grey',lty=1) + 
+  geom_vline(aes(xintercept=0), color='grey',lty=1) + 
+  geom_label_repel() +
+  theme_bw() + 
+  ylim(-1,1) + 
+  xlim(-1,1) + 
+  theme(legend.position = 'none') + 
+  scale_color_manual(values=c('red'='red','blue'='blue','grey'='grey')) + 
+  labs(x='Raw values',y='Model fit', 
+       title='Model fit improves agreement betweeen biomarker effect sizes',
+       subtitle = 'Pearson correlation between effect sizes of gene expression for all commonly-tested compounds',
+       caption = 'Models fit independently to CCLE and GDSC datasets. Data curated from PharmacoGx.')
+ggsave(filename='correlation_between_effect_sizes.pdf',width=8,height=4.5,units='in')
+```
+
+Same for pvalues.
+```{r}
+CCLE_GDSC %>%
+  filter(Method=='Continuous',Comparison == 'GDSC_CCLE') %>%
+  select(-logFC_correlation) %>%
+  spread(Measure, adj.P.Val_correlation) %>%
+  mutate(color = case_when(Posterior-AAC>0 ~ 'blue',
+                           Posterior==AAC ~' grey',
+                           Posterior<AAC ~ 'red')) %>%
+  ggplot(aes(x=AAC,y=Posterior,label=Drug, color=color)) + 
+  geom_point() + 
+  geom_abline(aes(slope=1,intercept=0),lty=2) + 
+  geom_hline(aes(yintercept=0), color='grey',lty=1) + 
+  geom_vline(aes(xintercept=0), color='grey',lty=1) + 
+  geom_label_repel() +
+  theme_bw() + 
+  ylim(-1,1) + 
+  xlim(-1,1) + 
+  theme(legend.position = 'none') + 
+  scale_color_manual(values=c('red'='red','blue'='blue','grey'='grey')) + 
+  labs(x='Raw values',y='Model fit', 
+       title='Model fit improves agreement betweeen biomarker effect sizes',
+       subtitle = 'Spearman correlation between adjusted P-values of gene expression for all commonly-tested compounds',
+       caption = 'Models fit independently to CCLE and GDSC datasets. Data curated from PharmacoGx.')
+
+ggsave(filename='correlation_between_pvals.pdf',width=8,height=4.5,units='in')
+```
+
+Load all estimated effect sizes from RNA.
+```{r}
+all_effect_sizes <- read_csv('~/Desktop/Concordance/results/CCLE_GDSC_biomarkers_rna/all_effect_sizes.csv')
+drug_types <- readRDS('~/Desktop/Concordance/results/CCLE_GDSC_fit_joint/posterior_drug_fits.RDS') %>%
+  distinct(drug, drug_type)
+
+all_effect_sizes <- all_effect_sizes %>%
+  left_join(drug_types, by=c('Drug'='drug'))
+```
+
+Simple comparison between number called significant.
+```{r}
+all_effect_sizes %>% 
+  mutate(isSignificant = adj.P.Val <= .05) %>%
+  filter((Measure == 'Posterior' & Dataset == 'Joint' & Method=='Binarized') |
+           (Measure == 'AAC' & Dataset == 'GDSC')) %>% 
+  select(symbol, isSignificant, Measure, isKnown, Drug) %>%
+  distinct() %>%
+  spread(Measure, isKnown) %>% 
+  na.omit() -> tdat
+chisq_pvals <- sapply(unique(tdat$Drug), function(dr) {
+  try(suppressWarnings({
+    tdat %>% 
+      filter(Drug==dr)  %$% 
+      table(AAC, Posterior) %>%
+      chisq.test() %$%
+      p.value
+  }), silent=TRUE)
+})
+
+mccvals <- tdat %>%
+  group_by(Drug) %>%
+  summarise(t00 = sum(AAC==FALSE & Posterior==FALSE),
+            t01 = sum(AAC==FALSE & Posterior==TRUE),
+            t10 = sum(AAC==TRUE & Posterior==FALSE),
+            t11 = sum(AAC==TRUE & Posterior==TRUE)) %>% 
+    mutate(t00 = t00+.5,
+          t11 = t11+.5,
+          t10 = t10+.5,
+          t01 = t01+.5) %>% 
+   ungroup() %>%
+   mutate(MCC = (t00*t11-t01*t10)/sqrt((t11+t01)*(t11+t10)*(t00+t10)*(t00+t01)))
+```
+
+Volcano plots.
+```{r}
+plot_dat <- all_effect_sizes %>% 
+  filter(Drug %in% c('Nilotinib','Sorafenib','PLX4720','PHA-665752','Nutlin-3','PD-0332991','Crizotinib','Erlotinib',
+                     'AZD0530','TAE684','AZD6244')) %>%
+  filter(Dataset=='Joint', Method=='Binarized') %>%
+  group_by(Drug) %>% 
+  mutate(num_known = n_distinct(isKnown)) %>%
+  ungroup() %>%
+  filter(num_known > 1) %>%
+  select(symbol, Feature, type, Measure, logFC, AveExpr, t, adj.P.Val, Drug, isKnown) %>% 
+  mutate(alpha = ifelse(isKnown,.9,.01)) %>%
+  mutate(capped_p = pmin(-log10(adj.P.Val),5),
+         hline = -log10(.05)) 
+plot_dat %>%
+  ggplot(aes(x=logFC,y=capped_p)) + 
+  geom_hline(aes(yintercept=0)) + 
+  geom_hline(aes(yintercept=hline),lty=2) + 
+  geom_point(data = plot_dat %>% filter(!isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  geom_point(data = plot_dat %>% filter(isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  theme_bw() + 
+  facet_grid(rows=vars(Measure),cols=vars(Drug),scales='free_x') + 
+  scale_fill_manual(values=c('FALSE'='grey','TRUE'='red')) + 
+  theme(legend.position='none',panel.grid.major = element_blank(), panel.grid.minor = element_blank())  + 
+  labs(x='log(Fold Chance)',y='-log10(Adjusted P-value)', 
+       caption = 'Models fit jointly to CCLE and GDSC datasets. Data curated from PharmacoGx.')
+
+ggsave(filename='plot.png',width=18,height=6,units='in')
+```
+
+Plot of difference between methods.
+```{r}
+plot_dat <- all_effect_sizes %>% 
+  filter(Drug=='Nilotinib') %>%
+  filter(Dataset=='Joint', Method=='Continuous') %>%
+  group_by(Drug) %>% 
+  mutate(num_known = n_distinct(isKnown)) %>%
+  ungroup() %>%
+  filter(num_known > 1) %>%
+  select(symbol, Feature, type, Measure, logFC, AveExpr, t, adj.P.Val, Drug, isKnown) %>% 
+  #mutate(adj.P.Val  = -log10(adj.P.Val)) %>%
+  gather('Estimate','Value', logFC:adj.P.Val) %>%
+  unite(Measure, Measure, Estimate) %>%
+  distinct() %>%
+  spread(Measure, Value) %>%
+  rename(AveExpr = AAC_AveExpr) %>%
+  select(-Posterior_AveExpr) %>%
+  na.omit() %>%
+  mutate(Diff_logFc = Posterior_logFC - AAC_logFC,
+         Diff_pval = Posterior_adj.P.Val - AAC_adj.P.Val,
+         Diff_t = Posterior_t - AAC_t) %>%
+  mutate(alpha = ifelse(isKnown,.9,.01))
+
+plot_dat %>%
+  ggplot(aes(x=Diff_logFc, y=Diff_t)) +
+  geom_hline(aes(yintercept=0)) + 
+  geom_vline(aes(xintercept=0)) + 
+  geom_point(data = plot_dat %>% filter(!isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  geom_point(data = plot_dat %>% filter(isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  facet_wrap(vars(Drug), scales='free_y') + 
+  theme_bw() + 
+  scale_fill_manual(values=c('FALSE'='grey','TRUE'='red')) + 
+  theme(legend.position='none',panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  labs(x='Change in Estimated LFC',y='Change in Estimated t-statistic', 
+       caption = 'Models fit independently to CCLE and GDSC datasets. Data curated from PharmacoGx.')
+```
+
+Two-way plot comparing methods.
+```{r}
+plot_dat <- all_effect_sizes %>%
+  #filter(Drug == 'Nilotinib') %>%
+  mutate(t=-log10(adj.P.Val)) %>%
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+         (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+         (Measure=='AAC' & Dataset == 'CCLE' & Method=='Continuous')) %>% 
+  select(symbol, Feature, type, entrezgene_id, t, Measure,  Drug, isKnown) %>% 
+  distinct() %>%
+  mutate(alpha = ifelse(isKnown,1,.02)) %>%
+  spread(Measure, t) %>% 
+  na.omit()
+plot_dat %>%
+  ggplot(aes(x=AAC, y=Posterior)) + 
+  geom_vline(aes(xintercept=0)) + 
+  geom_hline(aes(yintercept=0)) + 
+  geom_hline(aes(yintercept=-log10(.05)),lty=2) + 
+  geom_vline(aes(xintercept=-log10(.05)),lty=2) + 
+  geom_point(data = plot_dat %>% filter(!isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  geom_point(data = plot_dat %>% filter(isKnown), aes(alpha=alpha,fill=isKnown), show.legend = FALSE,pch=21,color='black') + 
+  #geom_smooth(method='lm',se=FALSE) + 
+  facet_wrap(vars(Drug), scales='free') + 
+  theme_bw() + 
+  scale_fill_manual(values=c('FALSE'='grey','TRUE'='red')) + 
+  theme(legend.position='none',panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  labs(x='t-statistic calculated from GDSC AAC',y='t-statistic calculated from joint posterior', 
+       caption = 'Data curated from PharmacoGx.')
+```
+
+Two-way plot for a single drug.
+```{r}
+plot_dat <- all_effect_sizes %>%
+  filter(Drug == 'Crizotinib') %>% 
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+         (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+         (Measure=='AAC' & Dataset == 'GDSC' & Method=='Continuous')) %>% 
+  filter(Measure %in% c('Posterior','AAC')) %>%
+  select(symbol, Measure, P.Value, Feature, entrezgene_id, isKnown) %>% 
+  mutate(P = -log10(P.Value)) %>%
+  select(-P.Value) %>%
+  distinct() %>%
+  spread(Measure, P) %>% 
+  replace_na(list(`AAC`=0, `Posterior`=0)) 
+
+plot_dat %>%
+  mutate(Pathway = case_when(`AAC` >= 5 | `Posterior`>= 5 ~ symbol,
+                             TRUE ~ '')) %>%
+  mutate(color = case_when(`AAC`>= -log10(.05) & `Posterior`< -log10(.05) ~ 1,
+                             `AAC`< -log10(.05) & `Posterior`>= -log10(.05) ~ 2,
+                             `AAC` >= -log10(.05) | `Posterior`>= -log10(.05) ~ 3,
+                             TRUE ~ 4)) %>%
+  ggplot(aes(x=`AAC`, y=`Posterior`, color=as.factor(color))) + 
+  geom_point(aes(color=as.factor(color)), show.legend=FALSE, alpha=.5, shape=21) +
+  geom_point(data=subset(plot_dat, isKnown), show.legend=FALSE, alpha=.5, color='red') +
+  geom_label_repel(aes(label=Pathway), size=2.5, color='black') + 
+  geom_vline(aes(xintercept=0)) + 
+  geom_hline(aes(yintercept=0)) + 
+  geom_hline(aes(yintercept=-log10(.05)),lty=2) + 
+  geom_vline(aes(xintercept=-log10(.05)),lty=2) + 
+  theme_bw() +
+  theme(legend.position='none') + 
+  scale_color_brewer(palette='PuBu') 
+```
+
+Print features with largest/smallest effect size. 
+```{r}
+all_effect_sizes %>%
+  filter(Drug == 'AZD0530') %>%
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized') | 
+         (Measure=='AAC' & Dataset == 'GDSC' & Method=='Continuous')) %>%
+  select(symbol, Feature, type, entrezgene_id, t, Dataset,  Drug, isKnown) %>% 
+  distinct() %>% 
+  group_by(Dataset) %>% 
+  top_n(10,t) %>%
+  ungroup()
+```
+
+Bar plot of number significant by method.
+```{r}
+all_effect_sizes %>% 
+  filter(Drug %in% c('Nilotinib','Sorafenib',
+                     'PLX4720','PHA-665752','Nutlin-3',
+                     'PD-0332991','Crizotinib','Erlotinib',
+                     'AZD0530','TAE684','AZD6244',
+                     'paclitaxel','17-AAG','lapatinib','PD-0325901')) %>%
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+         (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+         (Measure=='AAC' & Dataset == 'GDSC1000' & Method=='Continuous')) %>% 
+  group_by(Measure, type, Dataset, Drug, Method, drug_type) %>%
+  summarise(isSignificant  = sum(adj.P.Val<=.05)) %>%
+  ggplot(aes(x=Drug, y=isSignificant, fill=Dataset)) + 
+  geom_bar(stat='identity', position='dodge') +
+  facet_wrap(vars(drug_type), ncol=2, scales='free_x')
+```
+
+Dot plot of number significant by method for 15 common drugs.
+```{r}
+plot_dat <- all_effect_sizes %>% 
+  filter(Drug %in% c('Nilotinib','Sorafenib',
+                     'PLX4720','PHA-665752','Nutlin-3',
+                     'PD-0332991','Crizotinib','Erlotinib',
+                     'AZD0530','TAE684','AZD6244',
+                     'paclitaxel','17-AAG','lapatinib','PD-0325901')) %>%
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+         (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+         (Measure=='AAC' & Dataset %in% c('GDSC') & Method=='Continuous')) %>% 
+  group_by(Measure, type, Dataset, Drug, Method, drug_type) %>%
+  summarise(isSignificant  = sum(adj.P.Val<=.05)) %>% 
+  ungroup() %>%
+  mutate(Dataset = 'GDSC') %>% 
+  bind_rows(all_effect_sizes %>% 
+    filter(Drug %in% c('Nilotinib','Sorafenib',
+                       'PLX4720','PHA-665752','Nutlin-3',
+                       'PD-0332991','Crizotinib','Erlotinib',
+                       'AZD0530','TAE684','AZD6244',
+                       'paclitaxel','17-AAG','lapatinib','PD-0325901')) %>%
+    filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+           (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+           (Measure=='AAC' & Dataset %in% c('CCLE') & Method=='Continuous')) %>% 
+    group_by(Measure, type, Dataset, Drug, Method, drug_type) %>%
+    summarise(isSignificant  = sum(adj.P.Val<=.05)) %>% 
+    ungroup() %>%
+    mutate(Dataset = 'CCLE')) 
+plot_dat %>%
+  mutate(Measure2 = ifelse(Measure=='AAC',0,1)) %>%
+  ggplot(aes(x=Measure2, y=isSignificant, label=Drug, group=Drug, color=Drug)) + 
+  geom_point() + 
+  geom_line() + 
+  theme_bw() +
+  geom_text(data=subset(plot_dat %>% 
+                          mutate(y2 = case_when(Drug=='paclitaxel' ~ isSignificant+50,
+                                                Drug=='17-AAG' ~ isSignificant-50,
+                                                Drug=='PD-0332991' ~ isSignificant+50,
+                                                Drug=='Nilotinib' ~ isSignificant+50,
+                                                Drug=='PLX4720' ~ isSignificant+50,
+                                                Drug=='PHA-665752' ~ isSignificant+100,
+                                                Drug=='lapatinib' ~ isSignificant+25,
+                                                Drug=='Crizotinib' ~ isSignificant-50,
+                                                TRUE ~ isSignificant+0)), 
+                        Measure!='AAC' & Dataset=='GDSC'),aes(x=1.175,y=y2),hjust=0) +
+  coord_cartesian(clip='off',xlim = c(-.1, 1.1)) + 
+  facet_grid(cols=vars(Dataset), rows=vars(drug_type), switch='y') + 
+  theme(legend.position = 'none',
+        plot.margin = unit(c(1,5,1,1), "lines")) + 
+  scale_x_continuous(breaks=0:1, labels=c('AAC','Posterior'))
+```
+
+Slope plot.
+```{r}
+plot_dat <- plot_dat %>%
+  spread(Measure, isSignificant) %>% 
+  replace_na(list(AAC=0,Posterior=0)) %>%
+  mutate(fewer = Posterior < AAC)
+plot_dat %>% ggplot() +
+  geom_segment(aes(x = 1, xend = 2, 
+                   y = AAC, 
+                   yend = Posterior,
+                   group = Drug,
+                   col = fewer), 
+               size = 1.2) +
+  scale_color_manual(values = c("#468189", "#9DBEBB"), guide = "none")  +
+  theme_classic() + 
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank()) + 
+  facet_grid(cols=vars(Dataset), rows=vars(drug_type), switch='y') +
+  geom_segment(x = 1, xend = 1, 
+               y = 0,
+               yend = max(plot_dat$AAC) + 1,
+               col = "grey70", size = 0.5) +
+  geom_segment(x = 2, xend = 2, 
+               y = 0,
+               yend = max(plot_dat$Posterior) + 1,
+               col = "grey70", size = 0.5) +
+  geom_text(aes(x = x, y = y, label = label),
+            data = data.frame(x = c(1,2), 
+                              y = 75 + max(plot_dat$Posterior),
+                              label = c("AAC", "Posterior")),
+            col = "grey30",
+            size = 4) +
+  geom_text(aes(x = 1 - 0.03, 
+                y = AAC, 
+                label = Drug),
+             col = "grey30", hjust = "right", size=3) +
+  # set the limits of the x-axis so that the labels are not cut off
+  scale_x_continuous(limits = c(0.5, 2.1)) 
+
+```
+
+T-test.
+```{r}
+plot_dat %>% 
+  group_by(type,Dataset, drug_type) %>%
+  do(test = t.test(.$AAC,.$Posterior, paired=TRUE, alternative='two.sided')$p.value) %>%
+  ungroup() %>% 
+  mutate(test = unlist(test))
+```
+
+Similar idea but for all drugs.
+```{r}
+plot_dat <- all_effect_sizes %>% 
+  filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+         (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+         (Measure=='AAC' & Dataset %in% c('GDSC1000') & Method=='Continuous')) %>% 
+  group_by(Measure, type, Dataset, Drug, Method, drug_type) %>%
+  summarise(isSignificant  = sum(adj.P.Val<=.05)) %>% 
+  ungroup() %>%
+  mutate(Dataset = 'GDSC1000') %>% 
+  bind_rows(all_effect_sizes %>% 
+    filter((Measure=='Posterior' & Dataset=='Joint'& Method=='Binarized' & drug_type=='targeted') | 
+           (Measure=='Posterior' & Dataset=='Joint'& Method=='Continuous' & drug_type=='broad') |
+           (Measure=='AAC' & Dataset %in% c('CCLE') & Method=='Continuous')) %>% 
+    group_by(Measure, type, Dataset, Drug, Method, drug_type) %>%
+    summarise(isSignificant  = sum(adj.P.Val<=.05)) %>% 
+    ungroup() %>%
+    mutate(Dataset = 'CCLE')) 
+needs <- plot_dat %>% 
+  group_by(Drug) %>% 
+  summarise(nn = n_distinct(Measure)) %>% 
+  ungroup() %>%
+  filter(nn<2)
+plot_dat <- plot_dat %>%
+  bind_rows(plot_dat %>% 
+              filter(Drug  %in% needs$Drug) %>% 
+              mutate(isSignificant=0, Measure = 'Posterior') %>%
+              distinct())
+plot_dat %>%
+  ggplot(aes(x=Measure, y=isSignificant)) + 
+  geom_violin() + 
+  geom_jitter(alpha=.25,size=2.5,height = 0, width=.25)
+  theme_bw() +
+  facet_grid(cols=vars(Dataset), rows=vars(drug_type), switch='y') + 
+  theme(legend.position = 'none') 
+```

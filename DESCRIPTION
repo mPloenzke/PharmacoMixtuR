@@ -1,4 +1,4 @@
-Package: concordResponse
+Package: PharmacoMixtuR
 Type: Package
 Title: Estimate dose-response and consistency
 Version: 0.1.0

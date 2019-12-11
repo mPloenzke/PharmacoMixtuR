@@ -1,0 +1,153 @@
+---
+title: "Untitled"
+author: "Matt Ploenzke"
+date: "11/20/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Packages.
+```{r}
+library(tidyverse)
+library(ggrepel)
+```
+
+Load pathway output.
+```{r}
+pathway_path <- '~/Desktop/Concordance/results/CCLE_GDSC1000_gCSI_CTRPv2_FIMM_pathway_rna'
+drugs <- list.dirs(pathway_path,full.names=FALSE)
+drugs <- drugs[drugs!='']
+GO_tibble <- tibble()
+KEGG_tibble <- tibble()
+for (dr in drugs) {
+  filles <- list.files(file.path(pathway_path,dr))
+  for (fi in filles) {
+    if (grepl('GO',fi)) { 
+      GO_tibble <- read_csv(file.path(pathway_path,dr,fi)) %>%
+        as_tibble() %>%
+        mutate(File=fi, Drug=dr) %>%
+        bind_rows(GO_tibble)
+    } else if (grepl('KEGG',fi)) { 
+      KEGG_tibble <- read_csv(file.path(pathway_path,dr,fi)) %>%
+        as_tibble() %>%
+        mutate(File=fi, Drug=dr) %>%
+        bind_rows(KEGG_tibble)
+    }
+  }
+}
+```
+
+Format GO and KEGG results.
+```{r}
+GO_tibble <- GO_tibble %>%
+  mutate(File = gsub('GO_','',File)) %>%
+  mutate(File = gsub('.csv','',File)) %>%
+  separate(File,  into=c('Measure','Measure2','Dataset'),sep='_',fill='right',remove=TRUE) %>% 
+  select(-Measure2) %>% 
+  mutate(Dataset =  case_when((Dataset=='sensitive' | is.na(Dataset)) ~ 'Joint',
+                              TRUE ~ Dataset)) %>%
+  mutate(Measure = case_when(Measure == 'auc' ~ 'AAC',
+                             Measure == 'posterior'  ~ 'Posterior',
+                             Measure == 'cell'  ~ 'Cell type'))
+
+KEGG_tibble <- KEGG_tibble %>%
+  mutate(File = gsub('KEGG_','',File)) %>%
+  mutate(File = gsub('.csv','',File)) %>%
+  separate(File,  into=c('Measure','Measure2','Dataset'),sep='_',fill='right',remove=TRUE) %>% 
+  select(-Measure2) %>% 
+  mutate(Dataset =  case_when((Dataset=='sensitive' | is.na(Dataset)) ~ 'Joint',
+                              TRUE ~ Dataset)) %>%
+  mutate(Measure = case_when(Measure == 'auc' ~ 'AAC',
+                             Measure == 'posterior'  ~ 'Posterior',
+                             Measure == 'cell'  ~ 'Cell type'))
+
+```
+
+Plot GO results for all studies and methods.
+```{r}
+plot_tibble <- GO_tibble %>%
+  unite(Measure, Measure, Dataset, sep=' ') %>%
+  filter(P.Up<.05 | P.Down<.05) %>% 
+  mutate(P=pmin(P.Up, P.Down)) %>%
+  mutate(Up = case_when(P.Up < P.Down ~ 'Up',
+                        TRUE ~ 'Down')) %>%
+  group_by(Measure, Drug,Up) %>% 
+  arrange(P) %>%
+  mutate(Label = case_when(row_number()<=5 ~ Term,
+                           TRUE ~ '')) %>%
+  ungroup() 
+plot_tibble %>%
+  ggplot(aes(x=N,y=-log10(P),color=Up, label=Label)) + 
+  geom_point(alpha=.1) + 
+  geom_text_repel() +
+  facet_grid(rows=vars(Measure), cols = vars(Drug), scales='free') + 
+  theme_bw() +
+  theme(legend.position='top') +
+  scale_color_brewer(palette='Dark2')
+```
+
+Plot KEGG results for all studies and methods.
+```{r}
+plot_tibble <- KEGG_tibble %>%
+  unite(Measure, Measure, Dataset, sep=' ') %>%
+  #filter(P.Up<.05 | P.Down<.05) %>% 
+  mutate(P=pmin(P.Up, P.Down)) %>%
+  mutate(Up = case_when(P.Up < P.Down ~ 'Up',
+                        TRUE ~ 'Down')) %>%
+  group_by(Measure, Drug,Up) %>% 
+  arrange(P) %>%
+  mutate(Label = case_when(row_number()<=5 ~ Pathway,
+                           TRUE ~ '')) %>%
+  ungroup() 
+plot_tibble %>%
+  ggplot(aes(x=N,y=-log10(P),color=Up, label=Label)) + 
+  geom_point(alpha=.1) + 
+  geom_text_repel() +
+  facet_grid(rows=vars(Measure), cols = vars(Drug), scales='free') + 
+  theme_bw() +
+  theme(legend.position='top') +
+  scale_color_brewer(palette='Dark2')
+```
+
+Two-way plot comparing methods for KEGG.
+```{r}
+plot_dat <- KEGG_tibble %>%
+  unite(Measure, Measure, Dataset, sep=' ') %>%
+  mutate(P=pmin(P.Up, P.Down)) %>%
+  mutate(Up = case_when(P.Up < P.Down ~ 'Up',
+                        TRUE ~ 'Down')) %>%
+  group_by(Measure, Drug,Up) %>% 
+  arrange(P) %>%
+  mutate(Label = case_when(row_number()<=5 ~ Pathway,
+                           TRUE ~ '')) %>%
+  ungroup()  %>%
+  filter(Measure %in% c('Cell type Joint','AAC GDSC1000')) %>%
+  select(Pathway, Measure, P, Drug) %>% 
+  mutate(P = -log10(P)) %>%
+  spread(Measure, P) %>% 
+  replace_na(list(`AAC GDSC1000`=0, `Posterior Joint`=0))
+
+plot_dat %>%
+  mutate(Pathway = case_when(`AAC GDSC1000`>= -log10(.05) & `Cell type Joint`< -log10(.05) ~ Pathway,
+                             `AAC GDSC1000`< -log10(.05) & `Cell type Joint`>= -log10(.05) ~ Pathway,
+                             `AAC GDSC1000` >= -log10(.05) | `Cell type Joint`>= -log10(.05) ~ Pathway,
+                             TRUE ~ '')) %>%
+  mutate(color = case_when(`AAC GDSC1000`>= -log10(.05) & `Cell type Joint`< -log10(.05) ~ 1,
+                             `AAC GDSC1000`< -log10(.05) & `Cell type Joint`>= -log10(.05) ~ 2,
+                             `AAC GDSC1000` >= -log10(.05) | `Cell type Joint`>= -log10(.05) ~ 3,
+                             TRUE ~ 4)) %>%
+  filter(Drug == 'Crizotinib') %>% 
+  ggplot(aes(x=`AAC GDSC1000`, y=`Cell type Joint`, color=as.factor(color))) + 
+  geom_point(alpha=.5) + 
+  geom_text_repel(aes(label=Pathway), size=2.5) + 
+  geom_vline(aes(xintercept=0)) + 
+  geom_hline(aes(yintercept=0)) + 
+  geom_hline(aes(yintercept=-log10(.05)),lty=2) + 
+  geom_vline(aes(xintercept=-log10(.05)),lty=2) + 
+  #geom_smooth(method='lm',se=FALSE) + 
+  facet_wrap(vars(Drug), scales='free') + 
+  theme_bw() 
+```

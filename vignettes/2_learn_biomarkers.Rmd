@@ -1,0 +1,473 @@
+---
+title: "Untitled"
+author: "Matt Ploenzke"
+date: "8/12/2019"
+output: html_document
+---
+
+```{r}
+library(PharmacoGx)
+library(readxl)
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(mlbench)
+```
+
+Load data and filter to drug.
+```{r}
+drug_for_biomarkers <- 'lapatinib'
+min_posterior_probability_sensitive <- .25
+log_dir <- 'biomarkers_plots'
+dir.create(log_dir,showWarnings = FALSE)
+use_all_features <- FALSE
+use_known_drug_features <- TRUE
+posterior <- readRDS('~/Desktop/Concordance/tidyPharmaco/CCLE_GDSC_fit_joint/posterior.formatted.RDS') %>%
+#posterior <- readRDS('~/concordance/posterior.formatted.RDS') %>%
+  filter(drug==drug_for_biomarkers) %>%
+  select(cell, experiment, cell_type, posterior_probability_sensitive)
+datasets <- posterior %>% distinct(experiment) %>% pull()
+gene_drug_asociations <- read_excel('~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx', sheet = "mutation") %>%
+#gene_drug_asociations <- read_excel('~/concordance/PSets/gene_drug_asociations.xlsx', sheet = "mutation") %>%
+  as_tibble() %>%
+  bind_rows(read_excel('~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx', sheet = "copy_number_variation"),
+            read_excel('~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx', sheet = "expression")) %>%
+  #bind_rows(read_excel('~/concordance/PSets/gene_drug_asociations.xlsx', sheet = "copy_number_variation"),
+  #          read_excel('~/concordance/PSets/gene_drug_asociations.xlsx', sheet = "expression")) %>%
+  mutate(type=case_when(type=='expression' ~ 'rna',
+                        type=='copy_number_variation' ~ 'cnv',
+                        TRUE ~ type)) %>%
+  rename(drug=compound) %>%
+  select(type, drug, gene, source)
+if (use_known_drug_features) {
+  gene_drug_asociations <- gene_drug_asociations %>% filter(drug==drug_for_biomarkers)
+}
+```
+
+Set up X and Y data matrices.
+```{r}
+rez <- list()
+for (dataset in datasets) {
+  load(file.path('~/Desktop/Concordance/PSets',paste(dataset,'RData',sep='.')))
+  #load(file.path('~/concordance/PSets',paste(dataset,'RData',sep='.')))
+  eval(parse(text = paste('tempPset <- ',dataset,sep='')))
+  y_new_temp <- summarizeSensitivityProfiles(tempPset, sensitivity.measure = 'auc_recomputed', summary.stat = 'median', verbose = FALSE) %>%
+    as.data.frame() %>%
+    rownames_to_column('drug') %>%
+    as_tibble() %>% 
+    filter(drug==drug_for_biomarkers) %>%
+    gather(key='cell',value='value',-drug) %>%
+    filter(!is.na(value)) %>%
+    mutate(waterfall=PharmacoGx:::callingWaterfall(value,type='AUC')) %>%
+    ungroup() %>% 
+    rename(auc_recomputed=value) %>%
+    mutate(naive=ifelse(auc_recomputed>.2,'sensitive','resistant')) %>%
+    mutate(experiment = dataset)
+  for (feat in c('cnv','rna','mutation')) {
+    features <- gene_drug_asociations %>%
+      filter(type==feat) %>%
+      distinct(gene) %>% 
+      pull()
+    if (use_all_features) {
+      idx <- 1:length(featureInfo(tempPset,feat)$Symbol)
+    } else {
+      idx <- which(featureInfo(tempPset,feat)$Symbol %in% features)
+    }
+    molfeatures <- fNames(tempPset, feat)[idx]
+    if (length(molfeatures) > 0) {
+      stat <- ifelse(feat=='mutation','and','median')
+      x_new <- summarizeMolecularProfiles(tempPset, mDataType = feat, summary.stat = stat, verbose=TRUE) %>%
+        Biobase::exprs() %>%
+        as.data.frame() %>%
+        rownames_to_column('gene') %>%
+        as_tibble() %>%
+        gather(cell, value, -gene) %>%
+        filter(gene %in% molfeatures) %>%
+        mutate(gene = paste(gene,feat,sep='_')) %>%
+        spread(gene, value) %>% 
+        na.omit() 
+    } else {
+      x_new <- tibble(cell='NA')
+    }
+    if (feat=='cnv') {
+      joined <- x_new 
+    } else {
+      joined <- x_new %>% full_join(joined,by='cell')
+    }
+  }
+  rez[[dataset]] <- joined %>% inner_join(y_new_temp, by='cell')
+  eval(parse(text=paste('rm(',dataset,',tempPset, x_new, joined, y_new_temp)',sep='')))
+}
+rez <- do.call(bind_rows, rez)
+rez <- rez %>% 
+  mutate_at(vars(contains('mutation')),funs(as.numeric)) %>%
+  mutate_at(vars(contains('cnv')),funs(as.numeric)) %>%
+  mutate_at(vars(contains('rna')),funs(as.numeric))
+
+# filter columns with all NA in a single experiment
+for (vvar in colnames(rez)) {
+  max_na <- rez %>% 
+    group_by(experiment) %>% 
+    summarize(tt = mean(is.na(!!sym(vvar)))) %>%
+    ungroup() %>%
+    pull(tt) %>%
+    max
+  if (max_na == 1) {
+    rez <- rez %>% select(-!!sym(vvar))
+  }
+}
+rez <- rez %>%
+  inner_join(posterior,by=c('cell','experiment')) %>% 
+  mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',TRUE ~ 'resistant')) %>%
+  mutate_at(vars(contains('cnv')),funs( if_else( is.na(.), mean(.,na.rm=TRUE), .))) %>%
+  mutate_at(vars(contains('rna')),funs( if_else( is.na(.), mean(.,na.rm=TRUE), .))) %>%
+  mutate_at(vars(contains('mutation')),funs( if_else( is.na(.), mean(.,na.rm=TRUE), .)))
+```
+
+Define custom random forest caret method.
+```{r}
+customRF <- list(type = "Classification", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL) {predict(modelFit, newdata)}
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL) {predict(modelFit, newdata, type = "prob")}
+customRF$sort <- function(x) {x[order(x[,1]),]}
+customRF$levels <- function(x) {x$classes}
+```
+
+Train models for varying outcome variables.
+```{r}
+metric <- "Accuracy"
+set.seed(12345)
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+tunegrid <- expand.grid(.mtry=c(1:20), .ntree=c(10, 50, 100, 150))
+all_acc <- tibble()
+uncertain_points <- rez %>% filter(waterfall=='intermediate')
+rez <- rez %>% filter(waterfall!='intermediate')
+for (depVar in c('waterfall','naive','cell_type')) {
+  x <- rez %>% 
+    select(-drug, -cell, -experiment, -waterfall, -auc_recomputed, -naive, -cell_type, -posterior_probability_sensitive) %>% 
+    select(ends_with('mutation'), ends_with('rna'), ends_with('cnv'))
+  y <- rez %>% select(depVar)
+  dataset <- y %>% 
+    rename(Class=depVar) %>% 
+    select(Class) %>% 
+    bind_cols(x) %>% 
+    na.omit() %>%
+    mutate(Class = as.character(Class))
+  print(nrow(dataset))
+  custom <- train(Class~., data=dataset, method=customRF, metric=metric, tuneGrid=tunegrid, trControl=control)
+  all_acc <- custom$results %>%
+    as_tibble() %>% 
+    mutate(outcome_variable=depVar) %>%
+    bind_rows(all_acc)
+}
+```
+
+Plot accuracy results.
+```{r}
+p <- all_acc %>% 
+  mutate(ntree2 = ntree) %>%
+  mutate(ntree = paste('Number trees: ', ntree, sep='')) %>%
+  mutate(ntree = reorder(ntree,ntree2)) %>%
+  mutate(outcome_variable = case_when(outcome_variable == 'cell_type' ~ 'P(sensitive | AAC) > 0.5',
+                                      outcome_variable == 'naive' ~ 'AAC > 0.2',
+                                      outcome_variable == 'waterfall' ~ 'Waterfall method')) %>%
+  ggplot(aes(x=mtry,y=Kappa, color=outcome_variable, group=outcome_variable)) + 
+  geom_point(alpha=.75) +
+  geom_line(alpha=.75) + 
+  facet_wrap(vars(ntree), ncol=4) +
+  theme_bw() + 
+  scale_color_brewer(palette='Dark2') + 
+  labs(x='Number features', color='', y='',title='Random Forest Model Performance for Different Binarization Methods', subtitle='10-fold cross validation Cohens kappa') + 
+  theme(legend.position = 'top')
+ggsave(file.path(log_dir,'CV_kappas.pdf'), p)
+saveRDS(p,file.path(log_dir,'CV_kappas.RDS'))
+
+p <- all_acc %>% 
+  mutate(ntree2 = ntree) %>%
+  mutate(ntree = paste('Number trees: ', ntree, sep='')) %>%
+  mutate(ntree = reorder(ntree,ntree2)) %>%
+  mutate(outcome_variable = case_when(outcome_variable == 'cell_type' ~ 'P(sensitive | AAC) > 0.5',
+                                      outcome_variable == 'naive' ~ 'AAC > 0.2',
+                                      outcome_variable == 'waterfall' ~ 'Waterfall method')) %>%
+  ggplot(aes(x=mtry,y=Accuracy, color=outcome_variable, group=outcome_variable)) + 
+  geom_point(alpha=.75) +
+  geom_line(alpha=.75) + 
+  geom_errorbar(aes(ymin=Accuracy-AccuracySD, ymax=Accuracy+AccuracySD), width=.2, position=position_dodge(0.05),alpha=.75) + 
+  facet_wrap(vars(ntree), ncol=4) +
+  theme_bw() + 
+  scale_color_brewer(palette='Dark2') + 
+  labs(x='Number features', color='', y='',title='Random Forest Model Performance for Different Binarization Methods', subtitle='10-fold cross validation accuracy (Mean +/- SD)') + 
+  theme(legend.position = 'top')
+ggsave(file.path(log_dir,'CV_accuracy.pdf'), p)
+saveRDS(p,file.path(log_dir,'CV_accuracy.RDS'))
+```
+
+Plot the relationship between three outcome measures.
+```{r}
+x <- rez %>% 
+    select(-drug, -cell, -experiment, -waterfall, -auc_recomputed, -naive, -cell_type, -posterior_probability_sensitive) %>% 
+    select(ends_with('mutation'), ends_with('rna'), ends_with('cnv'))
+y <- rez %>% select(cell, experiment, auc_recomputed, waterfall, naive, posterior_probability_sensitive, cell_type) 
+dataset <- y %>% 
+  bind_cols(x) %>% 
+  na.omit() %>% 
+  select(cell, experiment, auc_recomputed, waterfall, naive, posterior_probability_sensitive, cell_type)
+p <- dataset %>%
+  ggplot(aes(x=auc_recomputed, y=posterior_probability_sensitive, color=waterfall)) + 
+  geom_point() + 
+  theme_bw() + 
+  facet_grid(cols=vars(experiment)) +
+  scale_color_brewer(palette='Dark2') + 
+  geom_hline(aes(yintercept=min_posterior_probability_sensitive),lty=2) + 
+  geom_vline(aes(xintercept=.2),lty=2)
+ggsave(file.path(log_dir,'relationship_between_labels.pdf'), p)
+saveRDS(p,file.path(log_dir,'relationship_between_labels.RDS'))
+```
+
+Fit best model for each outcome and compare features learned. 
+```{r}
+best_params <- all_acc %>% 
+  group_by(outcome_variable) %>%
+  filter(Accuracy==min(Accuracy)) %>%
+  select(mtry, ntree, outcome_variable)
+```
+
+Start with the naive fit.
+```{r}
+x <- rez %>% 
+    select(-drug, -cell, -experiment, -waterfall, -auc_recomputed, -naive, -cell_type, -posterior_probability_sensitive) %>% 
+    select(ends_with('mutation'), ends_with('rna'), ends_with('cnv'))
+y <- rez %>% select(cell, experiment, waterfall, naive, posterior_probability_sensitive, cell_type, auc_recomputed) 
+dataset <- y %>% 
+  bind_cols(x) %>% 
+  na.omit() 
+
+dataset_temp <- dataset %>% select(naive, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% mutate(naive=as.factor(naive))
+fit1 <- randomForest(naive~.,data=dataset_temp,
+                     ntree=pull(filter(best_params,outcome_variable=='naive'),ntree),
+                     mtry=pull(filter(best_params,outcome_variable=='naive'),mtry))
+
+naive_imp <- importance(fit1) %>%
+  as.data.frame() %>%
+  rownames_to_column('feature') %>% 
+  as_tibble() %>%
+  mutate(outcome_variable = 'naive')
+
+naive_preds <- dataset_temp %>%
+  select(naive) %>% 
+  mutate(Outcome = 'naive') %>%
+  rename(Actual=naive) %>%
+  bind_cols(dataset %>% select(cell, experiment)) %>%
+  mutate(Predicted=fit1$predicted)
+
+naive_diagnostics <- confusionMatrix(naive_preds$Actual, naive_preds$Predicted)
+```
+
+Get test set (intermediate called by waterfall) predictions for this measure.
+```{r}
+x_test <- uncertain_points %>% 
+    select(-drug, -cell, -experiment, -waterfall, -auc_recomputed, -naive, -cell_type, -posterior_probability_sensitive) %>% 
+    select(ends_with('mutation'), ends_with('rna'), ends_with('cnv'))
+y_test <- uncertain_points %>% select(cell, experiment, waterfall, naive, posterior_probability_sensitive, cell_type, auc_recomputed)
+dataset_test <- y_test %>% 
+  bind_cols(x_test) %>% 
+  na.omit() 
+dataset_test_temp <- dataset_test %>% select(naive, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% mutate(naive=as.factor(naive))
+naive_test_preds <- dataset_test %>%
+  select(waterfall) %>% 
+  mutate(Outcome = 'naive') %>%
+  rename(Actual=waterfall) %>%
+  bind_cols(dataset_test %>% select(cell, experiment)) %>%
+  mutate(Predicted=predict(fit1,dataset_test_temp))
+```
+
+Next use the posterior probability of sensitive.
+```{r}
+dataset_temp <- dataset %>% select(cell_type, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% mutate(cell_type=as.factor(cell_type))
+fit1 <- randomForest(cell_type~.,data=dataset_temp,
+                     ntree=pull(filter(best_params,outcome_variable=='cell_type'),ntree),
+                     mtry=pull(filter(best_params,outcome_variable=='cell_type'),mtry))
+posterior_imp <- importance(fit1) %>%
+  as.data.frame() %>%
+  rownames_to_column('feature') %>% 
+  as_tibble() %>% 
+  mutate(outcome_variable = 'posterior')
+
+posterior_preds <- dataset_temp %>%
+  select(cell_type) %>% 
+  mutate(Outcome = 'posterior') %>%
+  rename(Actual=cell_type) %>%
+  bind_cols(dataset %>% select(cell, experiment)) %>%
+  mutate(Predicted=fit1$predicted)
+
+posterior_diagnostics <- confusionMatrix(posterior_preds$Actual, posterior_preds$Predicted)
+```
+
+Get test set (intermediate called by waterfall) predictions for this measure.
+```{r}
+dataset_test_temp <- dataset_test %>% select(cell_type, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% mutate(cell_type=as.factor(cell_type))
+posterior_test_preds <- dataset_test %>%
+  select(waterfall) %>% 
+  mutate(Outcome = 'posterior') %>%
+  rename(Actual=waterfall) %>%
+  bind_cols(dataset_test %>% select(cell, experiment)) %>%
+  mutate(Predicted=predict(fit1,dataset_test_temp))
+```
+
+Last for the waterfall.
+```{r}
+dataset_temp <- dataset %>% select(waterfall, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% 
+  mutate(waterfall=as.character(waterfall)) %>%
+  filter(waterfall != 'intermediate') %>%
+  mutate(waterfall=as.factor(waterfall))
+fit1 <- randomForest(waterfall~.,data=dataset_temp,
+                     ntree=pull(filter(best_params,outcome_variable=='waterfall'),ntree),
+                     mtry=pull(filter(best_params,outcome_variable=='waterfall'),mtry),)
+waterfall_imp <- importance(fit1) %>%
+  as.data.frame() %>%
+  rownames_to_column('feature') %>% 
+  as_tibble() %>% 
+  mutate(outcome_variable = 'waterfall')
+
+waterfall_preds <- dataset_temp %>%
+  select(waterfall) %>% 
+  mutate(Outcome = 'waterfall') %>%
+  rename(Actual=waterfall) %>%
+  bind_cols(dataset %>% filter(waterfall != 'intermediate') %>% select(cell, experiment)) %>%
+  mutate(Predicted=fit1$predicted)
+
+
+waterfall_diagnostics <- confusionMatrix(waterfall_preds$Actual, waterfall_preds$Predicted)
+```
+
+Get test set (intermediate called by waterfall) predictions for this measure.
+```{r}
+dataset_test_temp <- dataset_test %>% select(waterfall, ends_with('mutation'), ends_with('rna'), ends_with('cnv')) %>% mutate(waterfall=as.factor(waterfall))
+waterfall_test_preds <- dataset_test %>%
+  select(waterfall) %>% 
+  mutate(Outcome = 'waterfall') %>%
+  rename(Actual=waterfall) %>%
+  bind_cols(dataset_test %>% select(cell, experiment)) %>%
+  mutate(Predicted=predict(fit1,dataset_test_temp))
+```
+
+Join all importance and predictions together.
+```{r}
+all.importance <- bind_rows(waterfall_imp, posterior_imp, naive_imp)
+all.predictions <- naive_preds %>% 
+  bind_rows(posterior_preds, waterfall_preds) %>%
+  left_join(dataset %>% select(cell, experiment, auc_recomputed, posterior_probability_sensitive), by=c('cell','experiment'))
+all.diagnostics <- list(naive=naive_diagnostics, posterior=posterior_diagnostics, waterfall=waterfall_diagnostics)
+```
+
+Bind in test set.
+```{r}
+all.test.predictions <- naive_test_preds %>% 
+  bind_rows(posterior_test_preds, waterfall_test_preds) %>%
+  left_join(dataset_test %>% select(cell, experiment, auc_recomputed, posterior_probability_sensitive), by=c('cell','experiment'))
+all.predictions <- all.predictions %>% bind_rows(all.test.predictions)
+```
+
+Load gene names.
+```{r}
+ensembl = biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+chr_genes <- biomaRt::getBM(attributes=c('ensembl_gene_id','ensembl_transcript_id','hgnc_symbol'), mart = ensembl) %>%
+  as_tibble()
+all.importance <- all.importance %>%
+  separate(feature,into=c('feature','extra1','extra2'), fill='right',sep='_') %>% 
+  left_join(chr_genes,by = c('feature'='ensembl_gene_id')) %>%
+  mutate(symbol = ifelse(is.na(hgnc_symbol),feature, hgnc_symbol)) %>%
+  mutate(type = ifelse(is.na(extra2),extra1, extra2))
+```
+
+Plot variable importance.
+```{r}
+p <- all.importance %>% 
+  filter(MeanDecreaseGini>0) %>%
+  mutate(wt = ifelse(outcome_variable=='posterior',1,0)) %>%
+  mutate(outcome_variable = case_when(outcome_variable == 'posterior' ~ 'P(sensitive | AAC) > 0.5',
+                                      outcome_variable == 'naive' ~ 'AAC > 0.2',
+                                      outcome_variable == 'waterfall' ~ 'Waterfall method')) %>%
+  mutate(type = case_when(type == 'mutation' ~ 'Mutation',
+                          type == 'rna' ~ 'RNA-seq',
+                          type == 'cnv' ~ 'CNV')) %>%
+  ggplot(aes(x=reorder(symbol,MeanDecreaseGini*wt), y=MeanDecreaseGini, color=type, group=symbol)) +
+  geom_point() +
+  #geom_line(color='grey') +
+  theme_bw() + 
+  coord_flip() +
+  facet_grid(cols=vars(outcome_variable)) + 
+  labs(x='Feature',y='Mean Decrease Gini',color='Feature type') +
+  scale_color_brewer(palette='Dark2') + 
+  theme(legend.position='top')
+ggsave(file.path(log_dir,'variable_importance.pdf'), p)
+saveRDS(p,file.path(log_dir,'variable_importance.RDS'))
+```
+
+Print diagnostics.
+```{r}
+diagnostics <- lapply(1:length(all.diagnostics), function(jj) {
+  print(names(all.diagnostics)[jj])
+  print(all.diagnostics[[jj]]$table)
+  data.frame(Value=all.diagnostics[[jj]]$byClass) %>% 
+    rownames_to_column('Metric') %>%
+    mutate(Outcome=names(all.diagnostics)[jj]) 
+})
+diagnostics <- do.call(bind_rows, diagnostics)
+```
+
+Plot diagnostics.
+```{r}
+p <- diagnostics %>% 
+  ggplot(aes(x=Outcome, y=Value, fill=Outcome)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(vars(Metric), ncol=3) +
+  theme_bw() + 
+  scale_fill_brewer(palette='Dark2') + 
+  theme(legend.position='top') + 
+  labs(y='', x='', fill='', title='Best Model Fit Diagnostics by Outcome Measure')
+ggsave(file.path(log_dir,'diagnostics.pdf'), p)
+saveRDS(p,file.path(log_dir,'diagnostics.RDS'))
+```
+
+Plot predicted versus actual.
+```{r}
+dd1 <- all.predictions %>%
+  select(Outcome, cell, experiment, Predicted, auc_recomputed, posterior_probability_sensitive) %>%
+  rename(Call = Predicted) %>%
+  mutate(Method = 'Predicted')
+for (dat in datasets) {
+  p <- all.predictions %>%
+    filter(experiment==dat) %>%
+    select(Outcome, cell, experiment, Actual, auc_recomputed, posterior_probability_sensitive) %>%
+    rename(Call = Actual) %>%
+    mutate(Method = 'Actual') %>%
+    bind_rows(dd1 %>% filter(experiment==dat)) %>%
+    na.omit() %>%
+    mutate(hline = case_when(Outcome == 'posterior' ~ min_posterior_probability_sensitive,
+                               Outcome == 'naive' ~ Inf,
+                               Outcome == 'waterfall' ~ Inf)) %>%
+    mutate(vline = case_when(Outcome == 'posterior' ~ Inf,
+                               Outcome == 'naive' ~ .2,
+                               Outcome == 'waterfall' ~ Inf)) %>%
+    mutate(Outcome = case_when(Outcome == 'posterior' ~ 'P(sensitive | AAC) > 0.5',
+                               Outcome == 'naive' ~ 'AAC > 0.2',
+                               Outcome == 'waterfall' ~ 'Waterfall method')) %>%
+    ggplot(aes(x=auc_recomputed,y=posterior_probability_sensitive, color=Call)) + 
+    geom_point(alpha=.6) + 
+    geom_hline(aes(yintercept=hline),lty=2) +
+    geom_vline(aes(xintercept=vline),lty=2) +
+    facet_grid(cols=vars(Outcome), rows=vars(Method)) +
+    theme_bw() + 
+    labs(y='Posterior probability sensitive',x='AAC', color='') + 
+    theme(legend.position='top') + 
+    scale_color_brewer(palette='Dark2')
+  ggsave(file.path(log_dir,paste(dat,'predicted_v_actual.pdf',sep='_')), p)
+  saveRDS(p,file.path(log_dir,paste(dat,'predicted_v_actual.RDS',sep='_')))
+}
+```

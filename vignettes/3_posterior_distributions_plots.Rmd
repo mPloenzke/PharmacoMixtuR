@@ -1,0 +1,69 @@
+---
+title: "Make figures"
+author: "Matt Ploenzke"
+date: "2/19/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Packages needed.
+```{r}
+rm(list=ls(all=TRUE))
+library(tidyverse)
+library(cowplot)
+```
+
+Combine posterior agreement plot with individual densities.
+```{r}
+base_path <- file.path('~/Desktop/Concordance/tidyPharmaco/CCLE_GDSC_fit_p60_old/auc_recomputed')
+drugs <- c('17AAG','AZD0530','AZD6244','Crizotinib','Erlotinib','lapatinib','Nilotinib','Nutlin3','paclitaxel',
+           'PD0325901','PD0332991','PHA665752','PLX4720','Sorafenib','TAE684')
+for (drug in drugs) {
+  p_main <- readRDS(file.path(base_path,'CCLE_GDSC','by_drug',paste(drug,'_posterior_CCLE_GDSC.RDS',sep=''))) + 
+    theme(legend.position = c(.1,.65), 
+          plot.title=element_blank()) + 
+    theme(axis.title = element_text(size = 14),
+          axis.text = element_text(size = 12))
+  p_top <- readRDS(file.path(base_path,'CCLE','fitted_densities_by_drug',paste(drug,'.RDS',sep=''))) + 
+    theme(plot.title=element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+      scale_color_brewer(palette = 'Dark2') + 
+    scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+    scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density')
+  p_side <- readRDS(file.path(base_path,'GDSC','fitted_densities_by_drug',paste(drug,'.RDS',sep=''))) + 
+    theme(plot.title=element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+      scale_color_brewer(palette = 'Dark2') + 
+    scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+    scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density') +
+    ggpubr::rotate() 
+  
+  cell_ty <- p_top$layers[[2]]$data %>% distinct(cell_type) %>% pull()
+  if ('sensitive' %in% cell_ty & drug!='AZD6244') {
+    p_top$layers[[2]]$data <- p_top$layers[[2]]$data %>% 
+      mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve))
+  }
+  cell_ty <- p_side$layers[[2]]$data %>% distinct(cell_type) %>% pull()
+  if ('sensitive' %in% cell_ty) {
+    p_side$layers[[2]]$data <- p_side$layers[[2]]$data %>% 
+      mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) 
+  }
+  
+  ggdraw() +
+    draw_plot(p_main,0,0,.85,.85) +
+    draw_plot(p_top,.05,.85,.80,.15) +
+    draw_plot(p_side,.85,.05,.15,.80) 
+  ggsave(paste(drug,'.png',sep=''),width=8,height=8,units='in')
+}
+```

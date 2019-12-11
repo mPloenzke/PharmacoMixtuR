@@ -63,6 +63,9 @@ sens.curves <-  rownames_to_column(as.data.frame(ccle.gdsc$CCLE@sensitivity$raw)
   filter(drugid %in% drugs,
          cellid %in% cells)
 dir.create(file.path('dose_response_curves','CCLE')) 
+dr <- 'lapatinib'
+ce <- 'NCI-H1666'
+ce <- 'HCC1187'
 for (dr in drugs) {
   drug.curves <- sens.curves %>% 
     filter(drugid==dr)
@@ -88,17 +91,21 @@ for (dr in drugs) {
     p <- tdat %>%
       ggplot(aes(x=concentrations,y=value)) +
         geom_point(shape=tdat$islarge) +
-        geom_line(data=preddat,aes(x=concentrations,y=value,group=1),show.legend=FALSE) + 
-        geom_vline(data=as.tibble(fit1),aes(xintercept=EC50),lty=2,lwd=.8,alpha=.5) +
-        geom_hline(data=as.tibble(fit1),aes(yintercept=E_inf),lty=2,lwd=.8,alpha=.5) + 
+        #geom_line(data=preddat,aes(x=concentrations,y=value,group=1),show.legend=FALSE) + 
+        #geom_vline(data=as.tibble(fit1),aes(xintercept=EC50),lty=2,lwd=.8,alpha=.5) +
+        #geom_hline(data=as.tibble(fit1),aes(yintercept=E_inf),lty=2,lwd=.8,alpha=.5) + 
+        #geom_ribbon(data=preddat,aes(x=concentrations,ymin=value,ymax=100,group=1),alpha=.25) +
+        geom_hline(aes(yintercept=0), lty=1,color='grey') + 
+        geom_hline(aes(yintercept=100), lty=1, color='grey') + 
         scale_x_continuous(trans='log10') + 
         labs(y = "Relative cell viability",
              x = expression(paste("Dose Concentration (", log10, " ", mu, "M)",sep=''))) + 
         scale_y_continuous(limits=c(ifelse(min(tdat$value)<0,min(tdat$value),0),
                                     ifelse(max(tdat$value)>100,max(tdat$value),100)),
                            breaks=seq(0,100,by=20)) + 
-      ggtitle(paste('CCLE - Compound:', dr,sep=' '),subtitle = paste('Cell ID:',ce,sep=' '))
-    ggsave(plot = p,filename = file.path('dose_response_curves','CCLE',paste(dr,'_',ce,'.pdf',sep='')))
+      ggtitle('Cell is sensitive to compound',subtitle = paste(paste('CCLE - Compound:', dr,sep=' '),
+                                                                     paste('Cell ID:',ce,sep=' '),sep='; '))
+    ggsave(plot = p,filename = file.path('dose_response_curves','CCLE',paste(dr,'_',ce,'_sensitive_1.png',sep='')))
     saveRDS(p,file.path('dose_response_curves','CCLE',paste(dr,'_',ce,'.RDS',sep='')))
   }
 }

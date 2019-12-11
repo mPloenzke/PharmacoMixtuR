@@ -1,0 +1,2397 @@
+---
+title: "Estimate posterior concordance"
+author: "Matt Ploenzke"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimate concordance}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+Set up and load packages.
+```{r setup, include=FALSE}
+  rm(list=ls(all=TRUE))
+  knitr::opts_chunk$set(echo = TRUE)
+  library(PharmacoMixtuR)
+  library(tidyverse)
+  library(ggridges)
+```
+
+Set options.
+```{r}
+  opt <- list()
+  opt$datasets <- c('CCLE','GDSC') # CCLE GDSC GDSC1000 gCSI FIMM CTRPv2
+  opt$biomarkers_file <- '~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx'
+  #opt$biomarkers_file <- '~/concordance/PSets/gene_drug_asociations.xlsx'
+  opt$min_intersection <- 2 # Minimum number of studies a drug/cell must be assayed in to be included in the intersection comparison
+  opt$log_dir <- paste(paste(opt$datasets,collapse='_'),'fit_p60',sep='_')
+  opt$sensitivity_measure <- c('auc_recomputed') # raw_auc e_inf hill_slope ec50 auc_recomputed
+  opt$use_small_datasets <- FALSE
+  # Prior specifications denoting cell sensitivity and proportion of drugs broadly-active:
+  opt$prior.sensitive <- .6 # .3 # prior specification denoting cell is sensitive if greater than this value
+  opt$prior.broadly.active <- 'median_mad' #median .05 # prior specification denoting drug is broadly-active if probability cell is sensitive is greater than value
+  opt$run_on_cluster <- FALSE # this just changes file paths depending on where the code is being run
+```
+
+Set up log directory.
+```{r}
+  dir.create(opt$log_dir,showWarnings = FALSE)
+  capture.output(opt, file = file.path(opt$log_dir,'model_Opts.csv'))
+```
+
+First download the full datasets.
+```{r,eval=FALSE}
+  PharmacoGx::availablePSets()
+  for (dataset in opt$datasets) {
+    PharmacoGx::downloadPSet(dataset)
+  }
+```
+
+Load data.
+```{r}
+  for (dataset in opt$datasets) {
+    if (opt$run_on_cluster) {
+      load(file.path('PSets',paste(dataset,'RData',sep='.')))
+    } else {
+      load(file.path('../PSets',paste(dataset,'RData',sep='.')))
+    }
+  }
+  if (opt$use_small_datasets) {
+    CCLE <- PharmacoGx::CCLEsmall
+    GDSC <- PharmacoGx::GDSCsmall
+  }
+```
+
+Format the sensitivity data for each experiment. Find cells and drugs assayed across experiment. Remove noisy experiments and mislabelled cell lines. Calculate sensitivity measures per cell/drug.
+```{r}
+  sensitivity.tibble.list <- intersectPSetWrapper(datasets = opt$datasets,
+                                                  minimum_intersection = 1,
+                                                  intersectOn = NULL,
+                                                  sensitivity_measure = opt$sensitivity_measure,
+                                                  remove_noisy_curves = FALSE,
+                                                  remove_mislabelled_cells = FALSE)
+```
+
+Repeat but for the intersection.
+```{r}
+  intersection.tibble.list <- intersectPSetWrapper(datasets = opt$datasets,
+                                                  minimum_intersection = opt$min_intersection,
+                                                  intersectOn = NULL,
+                                                  sensitivity_measure = opt$sensitivity_measure,
+                                                  remove_noisy_curves = FALSE,
+                                                  remove_mislabelled_cells = FALSE)
+  eval(parse(text=paste('rm(',paste(opt$datasets,collapse=','),')',sep='')))
+  intersection.tibble.list <- lapply(intersection.tibble.list, function(ii) {
+    ii %>% group_by(drug,cell,measure) %>% filter(n_distinct(experiment) >= opt$min_intersection) %>% ungroup()
+  })
+```
+
+Plot the distribution of each measure for the intersection.
+```{r}
+  for (meas in opt$sensitivity_measure) {
+    dir.create(file.path(opt$log_dir,meas),showWarnings = FALSE)
+    for (comp in names(intersection.tibble.list)) {
+      dir.create(file.path(opt$log_dir,meas,comp),showWarnings = FALSE)
+      p <- intersection.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        ggplot(aes(value)) +
+          stat_bin(bins=50) + 
+          theme_bw() + 
+          facet_grid(cols = vars(experiment),rows=vars(drug), scales = 'free_y') + 
+          theme(strip.text.x = element_text(size = 12),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) +  
+        theme(strip.text.x = element_text(size = 8), legend.position="none") + 
+          scale_x_continuous(name = meas) 
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('densities_raw.pdf',sep='')),width = 12, height = 24, units = "in")
+      saveRDS(p, file.path(opt$log_dir,meas,comp,paste('densities_raw.RDS',sep='')))
+      p <- intersection.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        mutate(drug=as.factor(drug)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        mutate(threshold = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ .4,
+                                     TRUE ~ .2)) %>%
+        ggplot(aes(x=value,y=drug,fill=experiment)) +
+        geom_density_ridges(alpha = .2) + 
+        scale_x_continuous(limits = c(0,1)) + 
+        theme_bw() +  scale_fill_brewer(palette="Dark2") +
+        theme(axis.title.y = element_blank()) + 
+        theme(strip.text.x = element_text(size = 24),
+              legend.text=element_text(size=24),
+              legend.title=element_text(size=24),
+              legend.position="top",
+              axis.text=element_text(size=24),
+              axis.title = element_text(size=24),
+              plot.title = element_text(size = 42),
+              plot.subtitle = element_text(size = 32)) +
+        labs(x='AAC',title='CCLE and GDSC sensitivity distributions', subtitle= 'Only common drugs shown')
+        ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('smoothed_densities_raw.png',sep='')),width = 16, height = 26, units = "in")
+        saveRDS(p, file = file.path(opt$log_dir,meas,comp,paste('smoothed_densities_raw.RDS',sep='')))
+    }
+   p <- intersection.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        mutate(drug=as.factor(drug)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        ggplot(aes(y=value,x=drug)) +
+          geom_boxplot() + 
+          theme_bw() + 
+          facet_wrap(vars(experiment), scales = 'free_x',ncol=1) + 
+            theme(strip.text.x = element_text(size = 18),
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position='none',
+            axis.text=element_text(size=16),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+            scale_y_continuous(breaks=c(0,1)) +
+            labs(x="Drug",y=meas)
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_common_drugs.pdf',sep='')),width = 12, height = 8, units = "in",limitsize=FALSE)
+      saveRDS(p, file.path(opt$log_dir,meas,comp,paste('boxplot_raw_common_drugs.RDS',sep='')))
+  }
+  while(dev.cur()!=1) {dev.off()}
+  common.drugs <- lapply(names(intersection.tibble.list), function(comp) {
+    intersection.tibble.list[[comp]] %>%
+      distinct(drug) %>% 
+      pull()
+  })
+  names(common.drugs) <- names(intersection.tibble.list)
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(intersection.tibble.list)) {
+      p <- sensitivity.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas, drug %in% common.drugs[[comp]]) %>%
+        mutate(drug=as.factor(drug)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        ggplot(aes(y=value,x=drug,fill=experiment)) +
+          geom_boxplot() + 
+          theme_bw() + 
+          #facet_wrap(vars(experiment), scales = 'free_x',ncol=1) + 
+            theme(strip.text.x = element_text(size = 18),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.text.y=element_text(size=16),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=12),
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+            scale_y_continuous(breaks=c(0,1)) +
+            labs(x="Drug",y=NULL)
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_cells.pdf',sep='')),width = 12, height = 8, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_cells.RDS',sep='')))
+      maxdr <- sensitivity.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas, drug %in% common.drugs[[comp]]) %>%
+        summarise(max(nchar(drug))) %>%
+        pull()
+      p <- sensitivity.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas) %>%
+        mutate(color = ifelse(drug %in% common.drugs[[comp]],'blue','grey')) %>%
+        mutate(drug=as.factor(drug),color=as.factor(color)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        ggplot(aes(y=value,x=drug)) +
+          geom_boxplot(aes(color=color),show.legend=FALSE) + 
+          theme_bw() + 
+          facet_wrap(vars(experiment), scales = 'free_x',ncol=1) + 
+            theme(strip.text.x = element_text(size = 18),
+            legend.position='none',
+            axis.text=element_text(size=16),
+            axis.text.x =element_text(colour = 'white',angle = 45, hjust = 1,size=8),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+            labs(x="Drug",y='AAC', title=comp) + 
+            scale_y_continuous(breaks=c(0,1)) +
+            scale_color_manual(values=c('black','grey50')) 
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_drugs.png',sep='')),width = 12, height = 8, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_drugs.RDS',sep='')))
+    }
+  }
+```
+
+Boxplot of all cells.
+```{r, eval=FALSE}
+sensitivity.tibble.list[['CCLE']] %>%
+  bind_rows(sensitivity.tibble.list[['GDSC']]) %>% 
+  group_by(drug) %>%
+  mutate(numm = n_distinct(experiment)) %>%
+  ungroup() %>%
+  filter(numm == 2) %>%
+  mutate(drug=reorder(drug, value, median)) %>%
+  ggplot(aes(x=drug,y=value,fill=experiment)) + 
+  geom_boxplot() +  
+  theme_bw() + 
+  scale_fill_brewer(palette='Dark2') +
+  theme(legend.position='bottom',
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x='',y='AAC',subtitle='Only common drugs shown',fill='',title='CCLE and GDSC sensitivity distributions')
+```
+
+Repeat for individual studies.
+```{r}
+  for (meas in opt$sensitivity_measure) {
+    dir.create(file.path(opt$log_dir,meas),showWarnings = FALSE)
+    for (comp in names(sensitivity.tibble.list)) {
+      dir.create(file.path(opt$log_dir,meas,comp),showWarnings = FALSE)
+      num_drug <- length(unique(sensitivity.tibble.list[[comp]]$drug))
+      p <- sensitivity.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        ggplot(aes(value)) +
+          stat_bin(bins=50) + 
+          theme_bw() + 
+          facet_wrap(vars(drug), scales = 'free_y',ncol=3) + 
+            theme(strip.text.x = element_text(size = 12),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) +
+          coord_cartesian(xlim = c(0, 1)) +
+          scale_x_continuous(name = meas) 
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('densities_raw.pdf',sep='')),width = 12, height = num_drug, units = "in",limitsize=FALSE)
+      saveRDS(p,file=file.path(opt$log_dir,meas,comp,paste('densities_raw.RDS',sep='')))
+      while(dev.cur()!=1) {dev.off()}
+      p <- sensitivity.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        mutate(drug=reorder(drug, value, median)) %>%
+        ggplot(aes(x=drug,y=value)) +
+          geom_boxplot() + 
+          theme_bw() + 
+            theme(strip.text.x = element_text(size = 12),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+          coord_cartesian(ylim = c(0, 1)) +
+          labs(x='Compound',y='AAC',title=comp)
+      if (comp %in% c('GDSC','CTRPv2')) {
+        p <- p + theme(axis.text.x =element_blank())
+      }
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplots_raw.png',sep='')),width = 12, height=6, units = "in")
+      saveRDS(p,file=file.path(opt$log_dir,meas,comp,paste('boxplots_raw.RDS',sep='')))
+    }
+  }
+  while(dev.cur()!=1) {dev.off()}
+```
+
+Random plots for presentations.
+```{r, eval=FALSE}
+comp <- 'CCLE'
+dr <- 'Irinotecan'
+p <- sensitivity.tibble.list[[comp]] %>%
+        filter(measure==meas,drug==dr) %>%
+        ggplot(aes(value)) +
+          stat_bin() + 
+          theme_bw() + 
+            theme(strip.text.x = element_text(size = 12),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) +
+          coord_cartesian(xlim = c(0, 1)) +
+  labs(x='AAC',y='Count',title='Distribution of drug sensitivity', subtitle='CCLE - Compound: Irinotecan')
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('myfigure.pdf',sep='')),width = 8, height = 6, units = "in",limitsize=FALSE)
+
+```
+
+Plot the pairwise concordance between two studies at a time.
+```{r}
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(intersection.tibble.list)) {
+      combos <- t(combn(sort(unique(intersection.tibble.list[[comp]]$experiment)),2))
+      for (combo in 1:nrow(combos)) {
+        p <- intersection.tibble.list[[comp]] %>%
+          filter(experiment %in% combos[combo,],
+                 measure == meas) %>%
+          select(drug,cell,experiment, measure, everything()) %>%
+          gather(variable, value, -(drug:measure)) %>% 
+          unite(temp, experiment, variable) %>%
+          spread(temp,value) %>%
+          ggplot(aes_string(x=paste(combos[combo,1],'value',sep='_'),
+                            y=paste(combos[combo,2],'value',sep='_'))) + 
+          geom_point(alpha=.15,size=1.5) + 
+          scale_color_brewer(palette = 'Dark2') + 
+          geom_abline(slope=1, size=.5,color='black', lty=3) + 
+          theme_bw() + 
+          facet_wrap(vars(drug),ncol=5) + 
+          theme(strip.text.x = element_text(size = 12),
+            legend.position='top',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=0),
+            title=element_text(size=14)) +
+          labs(x=combos[combo,1], y=combos[combo,2]) + 
+          scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+          scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1))
+        ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('2way_',
+                                              combos[combo,1],'_',combos[combo,2],
+                                              '.pdf',sep='')),
+             width = 18, height = 10, units = "in")
+        saveRDS(p,file=file.path(opt$log_dir,meas,comp,paste('2way_',
+                                              combos[combo,1],'_',combos[combo,2],
+                                              '.RDS',sep='')))
+        drugs <- unique(intersection.tibble.list[[comp]]$drug)
+        dir.create(file.path(opt$log_dir,meas,comp,'by_drug'),showWarnings = FALSE)
+        for (dr in drugs) {
+          p <- intersection.tibble.list[[comp]] %>%
+          filter(experiment %in% combos[combo,],drug==dr,measure==meas) %>% 
+          select(drug,cell,experiment, measure, everything()) %>%
+          gather(variable, value, -(drug:measure)) %>% 
+          unite(temp, experiment, variable) %>%
+          spread(temp,value) %>%
+          #mutate(CCLE_value = (CCLE_value-mean(CCLE_value))/sd(CCLE_value),
+          #       GDSC_value = (GDSC_value-mean(GDSC_value))/sd(GDSC_value)) %>%
+          ggplot(aes_string(x=paste(combos[combo,1],'value',sep='_'),
+                            y=paste(combos[combo,2],'value',sep='_'))) + 
+          geom_point(alpha=.5,size=4) + 
+          #geom_smooth(method='lm',se=FALSE) +
+          scale_color_brewer(palette = 'Dark2') + 
+          theme_bw() + 
+          theme(strip.text.x = element_text(size = 12),
+              legend.position='top',
+              axis.text=element_text(size=16),
+              axis.title=element_text(size=16),
+              legend.text=element_text(size=22),
+              legend.title=element_text(size=0),
+              title=element_text(size=14)) +
+          labs(x=combos[combo,1],y=combos[combo,2],title=paste(dr,' common cell sensitivity (AAC)',sep='')) + 
+          scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+          scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1))
+        ggsave(p,file=file.path(opt$log_dir,meas,comp,'by_drug',paste(dr,'_2way_',
+                                                combos[combo,1],'_',combos[combo,2],
+                                                '.png',sep='')),
+               width = 10, height = 8, units = "in")
+        saveRDS(p,file.path(opt$log_dir,meas,comp,'by_drug',paste(dr,'_2way_',
+                                                combos[combo,1],'_',combos[combo,2],
+                                                '.RDS',sep='')))
+        }
+      }
+    }
+  }
+```
+
+Initialize drug and cell assignments for EM using prior specifications for probability sensitive and probability drug is broadly active.
+```{r}
+drugs.tibble.list <- lapply(sensitivity.tibble.list, function(li) {
+  drug_dat <- li %>% 
+    mutate(all_median = quantile(value,opt$prior.sensitive),
+           all_mad = stats::mad(value),
+           drug=as.factor(drug)) %>% 
+    group_by(drug) %>% 
+    mutate(median=median(value),
+           mad=stats::mad(value),
+           all_median=first(all_median),
+           all_mad=first(all_mad)) %>%
+    ungroup() %>%
+    mutate(drug_type = ifelse(median<=all_median & mad<=all_mad,'targeted','broad')) %>%
+    distinct(drug, drug_type, all_median, all_mad, median, median, mad)
+  li %>% 
+    left_join(drug_dat, by='drug') %>%
+    mutate(sensitive = ifelse(value > all_median, 1,0)) %>%
+    group_by(drug, measure, drug_type) %>%
+    summarise(p_prior = mean(sensitive),
+              sensitive = sum(sensitive),
+              cell_count = n()) %>%
+    ungroup() %>% 
+    select(drug, measure, p_prior, sensitive, cell_count, drug_type)
+})
+cells.tibble.list <- lapply(1:length(sensitivity.tibble.list), function(li) {
+  sensitivity.tibble.list[[li]] %>% 
+    left_join(drugs.tibble.list[[li]], by=c('drug','measure')) %>% 
+    select(drug:measure,drug_type) %>%
+    mutate(thresho = case_when(drug_type == 'broad' ~ .5, TRUE ~ .95)) %>%
+    group_by(drug) %>%
+    mutate(cell_type = ifelse(value>=quantile(value,probs = thresho),'sensitive','resistant')) %>%
+    ungroup() %>% 
+    select(-thresho)
+})
+names(cells.tibble.list) <- names(drugs.tibble.list)
+```
+
+Plot median versus median absolute deviation for joined data using the MAD and specified percentile for drug-type classification.
+```{r}
+library(ggrepel)
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(sensitivity.tibble.list)) {
+      p <- sensitivity.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        mutate(all_median = quantile(value,.6),
+               all_mad = stats::mad(value),
+               drug=as.factor(drug)) %>% 
+        group_by(drug) %>% 
+        summarise(median=median(value),
+                  mad=stats::mad(value),
+                  all_median=first(all_median),
+                  all_mad=first(all_mad)) %>%
+        mutate(broad = ifelse(median<=all_median & mad<=all_mad,'Narrow effect','Broad effect'),
+               broad_hk = ifelse(mad>.13,'Broad effect','Narrow effect')) %>%
+        ggplot(aes(x=median,y=mad)) + 
+        geom_point(aes(color=broad),size=4,alpha=.6,show.legend=FALSE) +
+        #geom_hline(aes(yintercept=.13),lty=2,color=2) + 
+        geom_hline(aes(yintercept=all_mad),lty=2) + 
+        geom_vline(aes(xintercept=all_median),lty=2) +
+        theme_bw() +
+        labs(x='Median AAC', y='Median absolute deviation (MAD)') + 
+        ggtitle(comp)
+      ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Median_v_MAD.pdf',sep='')),width = 5, height = 5, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('Median_v_MAD.RDS',sep='')))
+    }
+  }
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(intersection.tibble.list)) {
+      combos <- t(combn(sort(unique(intersection.tibble.list[[comp]]$experiment)),2))
+      for (combo in 1:nrow(combos)) {
+        study1 <- sensitivity.tibble.list[[combos[combo,1]]] %>%
+          filter(measure==meas) %>%
+          mutate(all_median = quantile(value,.6),
+                 all_mad = stats::mad(value),
+                 drug=as.factor(drug)) %>% 
+          group_by(drug) %>% 
+          summarise(median=median(value),
+                    mad=stats::mad(value),
+                    all_median=first(all_median),
+                    all_mad=first(all_mad)) %>%
+          mutate(broad = ifelse(median<=all_median & mad<=all_mad,'Narrow effect','Broad effect'),
+                 broad_hk = ifelse(mad>.13,'Broad effect','Narrow effect'))
+        study2 <- sensitivity.tibble.list[[combos[combo,2]]] %>%
+          filter(measure==meas) %>%
+          mutate(all_median = quantile(value,.6),
+                 all_mad = stats::mad(value),
+                 drug=as.factor(drug)) %>% 
+          group_by(drug) %>% 
+          summarise(median=median(value),
+                    mad=stats::mad(value),
+                    all_median=first(all_median),
+                    all_mad=first(all_mad)) %>%
+          mutate(broad = ifelse(median<=all_median & mad<=all_mad,'Narrow effect','Broad effect'),
+               broad_hk = ifelse(mad>.13,'Broad effect','Narrow effect'))
+        studies <- study1 %>% mutate(experiment=combos[combo,1]) %>% 
+          bind_rows(study2 %>% mutate(experiment=combos[combo,2]))
+        p <- intersection.tibble.list[[comp]] %>%
+          filter(experiment %in% combos[combo,],
+                 measure == meas) %>%
+          distinct(drug,experiment) %>%
+          left_join(studies,by=c('drug','experiment')) %>%
+          ggplot(aes(x=median,y=mad,color=broad,shape=broad_hk,label=drug),size=3) + 
+          geom_point() +
+          geom_hline(aes(yintercept=.13),lty=2,color=2) + 
+          geom_hline(aes(yintercept=all_mad),lty=2) + 
+          geom_vline(aes(xintercept=all_median),lty=2) +
+          theme_bw() +
+          facet_grid(cols=vars(experiment)) + 
+          scale_color_brewer(palette='Dark2') +
+          geom_text_repel(show.legend=FALSE,size=5)
+        ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Median_v_MAD.pdf',sep='')),width = 8, height = 5, units = "in",limitsize=FALSE)
+        saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('Median_v_MAD.RDS',sep='')))
+      }
+    }
+  }
+```
+
+Plot the drug and cell initial assignments.
+```{r}
+library(ggrepel)
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(sensitivity.tibble.list)) {
+      p <- drugs.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        ggplot(aes(p_prior)) +
+          stat_bin(bins=50) + 
+          theme_bw() + 
+          theme(strip.text.x = element_text(size = 12),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) +
+          coord_cartesian(xlim = c(0, 1)) +
+          scale_x_continuous(name = 'p_prior') 
+      ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('p_prior.pdf',sep='')),width = 4, height = 4, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('p_prior.RDS',sep='')))
+    }
+  }
+  for (meas in opt$sensitivity_measure) {
+    for (comp in names(intersection.tibble.list)) {
+      p <-  cells.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas, drug %in% common.drugs[[comp]]) %>%
+        mutate(drug=as.factor(drug)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        ggplot(aes(y=value,x=drug,fill=as.factor(drug_type))) +
+          geom_boxplot() + 
+          theme_bw() + 
+          facet_wrap(vars(experiment), scales = 'free_x',ncol=1) + 
+            theme(strip.text.x = element_text(size = 18),
+            legend.position='bottom',
+            axis.text=element_text(size=12),
+            axis.text.y=element_text(size=16),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=12),
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+            scale_y_continuous(breaks=c(0,1)) +
+            labs(x="Drug",y=NULL)
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_cells_prior.pdf',sep='')),width = 12, height = 8, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_cells_prior.RDS',sep='')))
+      maxdr <- sensitivity.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas, drug %in% common.drugs[[comp]]) %>%
+        summarise(max(nchar(drug))) %>%
+        pull()
+      p <- cells.tibble.list[strsplit(comp,split='_')[[1]]] %>%
+        bind_rows() %>%
+        filter(measure==meas) %>%
+        mutate(color = ifelse(drug %in% common.drugs[[comp]],'blue','grey')) %>%
+        mutate(drug=as.factor(drug),color=as.factor(color)) %>% 
+        mutate(drug=reorder(drug, value, mean)) %>%
+        ggplot(aes(y=value,x=drug)) +
+          geom_boxplot(aes(color=color, fill=as.factor(drug_type)),show.legend=FALSE) + 
+          theme_bw() + 
+          facet_wrap(vars(experiment), scales = 'free_x',ncol=1) + 
+            theme(strip.text.x = element_text(size = 18),
+            legend.position='bottom',
+            axis.text=element_text(size=16),
+            axis.text.x =element_text(colour = 'white',angle = 45, hjust = 1,size=8),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+            labs(x="Drug",y=meas) + 
+            scale_y_continuous(breaks=c(0,1)) +
+            scale_color_manual(values=c('black','grey50')) 
+      ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_drugs_prior.pdf',sep='')),width = 12, height = 8, units = "in",limitsize=FALSE)
+      saveRDS(p, file=file.path(opt$log_dir,meas,comp,paste('boxplot_raw_all_drugs_prior.RDS',sep='')))
+    }
+  }
+```
+
+Smoothed density of the prior pi across all studies.
+```{r}
+  for (meas in opt$sensitivity_measure) {
+    temptibb <- tibble()
+    for (comp in names(sensitivity.tibble.list)) {
+      temptibb <- drugs.tibble.list[[comp]] %>%
+        filter(measure==meas) %>%
+        mutate(experiment=comp) %>%
+        bind_rows(temptibb)
+    }
+    p <- temptibb %>% 
+      ggplot(aes(x=p_prior,fill='one',y=..scaled..)) +
+        geom_density(alpha = .5) + 
+        theme_bw() +  
+        facet_wrap(vars(experiment),nrow=2) +
+        scale_fill_brewer(palette="Dark2") +
+        theme(strip.text.x = element_text(size = 14),
+              legend.text=element_text(size=14),
+              legend.title=element_text(size=14),
+              legend.position="none",
+              axis.text=element_text(size=12),
+              axis.title = element_text(size=14),
+              plot.title = element_text(size = 16)) +
+        scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1),name=expression(paste(p, '(',pi, ")",sep=''))) +
+        scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density')
+    ggsave(p, file=file.path(opt$log_dir,meas,paste('p_prior_smoothed.pdf',sep='')),width = 4, height = 4, units = "in",limitsize=FALSE)
+    saveRDS(p, file=file.path(opt$log_dir,meas,paste('p_prior_smoothed.RDS',sep='')))
+  }
+```
+
+Using the assignments, fit distributions (first M step) and use these as priors to initialize EM with. 
+```{r}
+meas <- opt$sensitivity_measure[1]
+drug_types_list <- lapply(drugs.tibble.list, function(tibb) {
+  tibb %>%
+    filter(measure==meas) %>%
+    group_by(drug_type) %>%
+    do(mutate(fit_bb_mle(.$sensitive, .$cell_count), number = nrow(.))) %>%
+    ungroup() %>%
+    mutate(drug_type_prior = number / sum(number))
+})
+targetted_drug_fits_list <- lapply(cells.tibble.list, function(tibb) {
+  ttibb <- tibb %>%
+    filter(measure==meas) %>%
+    mutate(value = ifelse(value==0,1e-3,value)) %>%
+    mutate(drug_type = 'targeted') %>%
+    group_by(drug, cell_type, drug_type) %>%
+    do(mutate(fit_beta_mle(.$value),number = nrow(.))) %>%
+    group_by(drug, drug_type) %>%
+    mutate(ndist=n_distinct(cell_type)) %>%
+    ungroup()
+  ttibb %>%
+    bind_rows(
+      ttibb %>% 
+        filter(ndist<2) %>% 
+        mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
+               cell_type=cell_type2,
+               number=0,
+               alpha=case_when(cell_type == 'resistant' ~ 1,
+                               cell_type == 'sensitive' ~ 1),
+               beta=case_when(cell_type == 'resistant' ~ 1,
+                              cell_type == 'sensitive' ~ 1)) %>%
+        select(-cell_type2)
+    ) %>%
+    group_by(drug) %>%       
+    mutate(targeted_cell_type_prior = number / sum(number)) %>%
+    ungroup() %>% 
+    select(-ndist)
+})
+broad_drug_fits_list <- lapply(cells.tibble.list, function(tibb) {
+  tibb %>%
+    filter(measure==meas) %>%
+    mutate(x=ifelse(value==0,1e-3,value)) %>%
+    group_by(drug) %>%
+    do(mutate(fit_beta_mle(.$x),number = nrow(.))) %>%
+    ungroup() %>% 
+    mutate(broad_cell_type_prior = .5, drug_type = 'broad') %>% 
+    select(drug, drug_type, alpha, beta, number, broad_cell_type_prior)
+})
+```
+
+Perform an expectation step using the distributions to initialize for the EM. 
+```{r}
+targetted_cell_assignments_list <- lapply(1:length(targetted_drug_fits_list), function(num) {
+  targetted_drug_list <- unique(targetted_drug_fits_list[[num]]$drug)
+  targetted_cell_assignments <- lapply(targetted_drug_list, function(dr) {
+    cells.tibble.list[[num]] %>%
+      filter(drug == dr,measure==meas) %>%
+      select(drug:measure) %>%
+      mutate(drug_type = 'targeted') %>%
+      mutate(value=ifelse(value==0,1e-3,value)) %>%
+      crossing(targetted_drug_fits_list[[num]] %>% filter(drug == dr) %>% select(-drug,-drug_type)) %>%
+      mutate(median = qbeta(.5,alpha,beta),
+             likelihood = dbeta(value, alpha, beta)) %>% 
+      group_by(cell_type) %>%
+      mutate(max.likelihood=max(likelihood)) %>%
+      ungroup() %>%
+      mutate(likelihood = case_when(value>median & cell_type == 'sensitive' ~ max.likelihood-likelihood + max.likelihood, 
+                                    TRUE~likelihood)) %>%
+      mutate(likelihood = targeted_cell_type_prior * likelihood) %>%
+      group_by(drug, cell) %>%
+      mutate(posterior=exp(log(likelihood)-log(sum(likelihood)))) %>% 
+      top_n(1, likelihood) %>%
+      ungroup()
+  })
+  do.call(bind_rows, targetted_cell_assignments)
+})
+broad_cell_assignments_list <- lapply(1:length(broad_drug_fits_list), function(num) {
+  cells.tibble.list[[num]] %>%
+      filter(drug %in% unique(broad_drug_fits_list[[num]]$drug),measure==meas) %>%
+      select(drug:measure) %>%
+      mutate(drug_type = 'broad') %>%
+      mutate(value=ifelse(value==0,1e-3,value)) %>%
+      left_join(broad_drug_fits_list[[num]], by=c('drug','drug_type')) %>%
+      mutate(likelihood = 1 * dbeta(value, alpha, beta),
+             cell_type = ifelse(value>=qbeta(.5,.$alpha,.$beta),'sensitive','resistant'))
+})
+
+drugs.tibble.list <- lapply(1:length(drugs.tibble.list), function(num) {
+  targetteds <- drugs.tibble.list[[num]] %>%
+    filter(measure==meas) %>%
+    select(drug, measure, p_prior) %>%
+    right_join(targetted_cell_assignments_list[[num]] %>% select(drug, cell, cell_type, likelihood), by='drug') %>% 
+    group_by(drug, measure, p_prior) %>%
+    summarise(sensitive = sum(cell_type=='sensitive'),
+              cell_count = n()) %>%
+    ungroup() %>% 
+    mutate(type='targeted')
+  broads <- drugs.tibble.list[[num]] %>%
+    filter(measure==meas) %>%
+    select(drug, measure, p_prior) %>%
+    right_join(broad_cell_assignments_list[[num]] %>% select(drug, cell, cell_type), by='drug') %>% 
+    group_by(drug, measure, p_prior) %>%
+    summarise(sensitive = sum(cell_type=='sensitive'),
+              cell_count = n()) %>%
+    ungroup() %>%
+    mutate(type='broad')
+  bind_rows(targetteds, broads)
+})
+
+drug_assignments_list <- lapply(1:length(drugs.tibble.list), function(num) {
+  drugs.tibble.list[[num]] %>%
+    filter(measure==meas) %>%
+    rename(drug_type = type) %>%
+    right_join(drug_types_list[[num]] %>% select(-number, -drug_type_prior), by='drug_type') %>%
+    mutate(drug_type_prior = case_when (drug_type == 'broad' ~ p_prior, TRUE ~ 1-p_prior)) %>%
+    mutate(likelihood = drug_type_prior * VGAM::dbetabinom.ab(sensitive, cell_count, alpha, beta)) %>%
+    group_by(drug) %>%
+    mutate(posterior=likelihood/sum(likelihood)) %>% 
+    top_n(1, likelihood) %>%
+    ungroup()
+})
+
+cell_assignments_list <- lapply(1:length(targetted_cell_assignments_list), function(num) {
+  bind_rows(targetted_cell_assignments_list[[num]],broad_cell_assignments_list[[num]]) %>%
+    group_by(drug, cell_type) %>%
+    fill(targeted_cell_type_prior, .direction='down') %>%
+    ungroup() %>%
+    group_by(drug) %>% 
+    fill(broad_cell_type_prior, .direction='up') %>%
+    ungroup() %>% 
+    right_join(drug_assignments_list[[num]] %>% select(drug, drug_type), by=c('drug','drug_type')) %>% 
+    select(drug, cell, value, experiment, measure, drug_type, cell_type, broad_cell_type_prior, targeted_cell_type_prior)
+})
+names(cell_assignments_list) <- names(drug_types_list)
+```
+
+Plot the prior drug densities.
+```{r, eval=FALSE}  
+for (num in names(drug_types_list)) {
+  drug_type_iterations <- drug_types_list[[num]]
+  drug_fits_iterations <- bind_rows(broad_drug_fits_list[[num]],targetted_drug_fits_list[[num]])
+  cell_assignments_iterations <- cell_assignments_list[[num]]
+  betadens <- drug_fits_iterations %>%
+    mutate(cross = paste(cell_type, drug, sep='_')) %>%
+    plyr::ddply(., "cross", function(df) {
+      data.frame( 
+      value = seq(.001, .999, length = 1000),
+      beta_curve = dbeta(seq(.001, .999, length = 1000), 
+                           df$alpha, 
+                           df$beta) 
+    )
+  })
+  betadens <- as_tibble(betadens) %>% 
+    separate(cross,into=c('cell_type','drug'),sep='_') %>%
+    full_join(drug_fits_iterations %>% mutate(cell_type = ifelse(is.na(cell_type),'NA',cell_type)), by=c('drug','cell_type')) %>%
+    group_by(drug,cell_type) %>% 
+    mutate(prior = ifelse(prior < .1,.1,prior)) %>%
+    mutate(beta_curve = beta_curve/max(beta_curve)*prior) %>%
+    ungroup() %>%
+    filter(beta_curve>1e-5) %>%
+    mutate(cell_type = ifelse(cell_type=='sensitive','sensitive','resistant'))
+  p <- cell_assignments_iterations %>%
+    ggplot(aes(value,y=..scaled..)) +
+      geom_density(adjust=.5,fill=1) +
+      theme_bw() + 
+      facet_wrap(vars(drug), scales = 'free_y',ncol=3) + 
+      theme(strip.text.x = element_text(size = 8),
+          legend.position='none',
+          axis.text=element_text(size=12),
+          axis.title=element_text(size=12),
+          legend.text=element_text(size=12),
+          legend.title=element_text(size=12),
+          title=element_text(size=14)) + 
+    scale_x_continuous(limits = c(0,1), name=meas) + 
+    geom_line(data=betadens, aes(y = beta_curve, color=cell_type), lwd = 1) 
+  ggsave(p,file=file.path(opt$log_dir,meas,num,paste('prior_densities_smoothed.pdf',sep='')),width = 12, height = 24, units = "in")
+  saveRDS(p, file=file.path(opt$log_dir,meas,num,paste('prior_densities_smoothed.RDS',sep='')))
+  while(dev.cur()!=1) {dev.off()}
+  dir.create(file.path(opt$log_dir,meas,num,'prior_densities_by_drug'),showWarnings = FALSE)
+  for (dr in unique(cell_assignments_iterations$drug)) {
+    dr_type <- cell_assignments_iterations %>%
+      filter(drug==dr) %>% 
+      distinct(drug_type) %>% 
+      pull
+    dr_short <- gsub("[^[:alnum:]]","",dr)
+    dr_nonums <- gsub('[0-9]+', '', dr_short)
+    if (nchar(dr_nonums)==0) {dr_short <- paste('drug',dr_short,sep='')}
+    p <- cell_assignments_iterations %>%
+      filter(drug==dr) %>%
+      ggplot(aes(value,y=..scaled..)) +
+        geom_density(adjust=.5,fill=1) +
+        theme_bw() + 
+        theme(strip.text.x = element_text(size = 18),
+          legend.position='none',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=16),
+          title=element_text(size=18)) +
+      scale_x_continuous(limits = c(0,1)) + 
+      labs(y='Scaled Density',x='AOC') +
+      geom_line(data=betadens %>% filter(drug==dr), aes(y = beta_curve, color=cell_type), lwd = 1.5) +
+      ggtitle(paste(dr,sep=' '))
+    ggsave(p, file=file.path(opt$log_dir,meas,num,'prior_densities_by_drug',paste(dr_short,'.png',sep='')),width = 12, height = 8, units = "in")
+    saveRDS(p, file=file.path(opt$log_dir,meas,num,'prior_densities_by_drug',paste(dr_short,'.RDS',sep='')))
+  }
+}
+```
+
+Run EM.
+```{r}
+  iterations_list <- list()
+  for(num in 1:length(cell_assignments_list)) {
+    drug_assignments <- drug_assignments_list[[num]]
+    cell_assignments <- cell_assignments_list[[num]]
+    iterations_list[[num]] <- accumulate(1:3, iterate_em, .init = list(drug_assignments = drug_assignments,
+                                                                       cell_assignments = cell_assignments))
+  }
+  names(iterations_list) <- names(sensitivity.tibble.list)
+```
+
+Plot parameters across iterations.
+```{r}
+for (num in names(iterations_list)) {
+  drug_type_iterations <- iterations_list[[num]] %>% 
+    map_df("drug_types", .id = "iteration") %>% 
+    bind_rows(drug_types_list[[num]] %>% 
+                mutate(iteration='0')) %>%
+    group_by(iteration) %>%
+    mutate(drug_type_prior = case_when(is.na(drug_type_prior) ~ number/sum(number), TRUE ~ drug_type_prior)) %>%
+    ungroup()
+  drug_fits_iterations <- iterations_list[[num]] %>% 
+    map_df("drug_fits", .id = "iteration") %>% 
+    bind_rows(broad_drug_fits_list[[num]] %>% 
+                mutate(iteration='0') %>%
+                select(drug, drug_type, alpha, beta, iteration),
+              targetted_drug_fits_list[[num]] %>% 
+                mutate(iteration='0') %>%
+                select(drug, drug_type, alpha, beta, iteration))
+  cell_assignments_iterations <- iterations_list[[num]] %>% 
+    map_df("cell_assignments", .id = "iteration") %>% 
+    bind_rows(cell_assignments_list[[num]] %>%
+                mutate(iteration='0'))
+  p <- drug_type_iterations %>%
+    crossing(x = seq(.001, .999, .001)) %>%
+    mutate(density = drug_type_prior * dbeta(x, alpha, beta)) %>%
+    ggplot(aes(x, density, color = iteration, group = iteration)) +
+    geom_line() +
+    facet_wrap(~ drug_type) + 
+    theme(strip.text.x = element_text(size = 18),
+          legend.position='bottom',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=16),
+          title=element_text(size=18)) +
+          labs(y='Density',x='AOC')
+  ggsave(p,file=file.path(opt$log_dir,meas,num,paste('parameter_updates.pdf',sep='')),width = 12, height = 8, units = "in")
+  saveRDS(p,file=file.path(opt$log_dir,meas,num,paste('parameter_updates.RDS',sep='')))
+}
+```
+
+Obtain posterior information from last EM rep.
+```{r}
+  posterior_drug_types_list <- lapply(names(iterations_list), function(num) {
+    iterations_list[[num]] %>% 
+      map_df("drug_types", .id = "iteration") %>% 
+      filter(iteration==max(iteration))
+  })
+  posterior_drug_assignments_list <- lapply(names(iterations_list), function(num) {
+    iterations_list[[num]] %>% 
+      map_df("drug_assignments", .id = "iteration") %>% 
+      filter(iteration==max(iteration))
+  })
+  posterior_drug_fits_list <- lapply(names(iterations_list), function(num) {
+    iterations_list[[num]] %>% 
+      map_df("drug_fits", .id = "iteration") %>% 
+      filter(iteration==max(iteration))
+  })
+  posterior_cell_assignments_list <- lapply(names(iterations_list), function(num) {
+    iterations_list[[num]] %>% 
+      map_df("cell_assignments", .id = "iteration") %>% 
+      filter(iteration==max(iteration))
+  })
+  names(posterior_cell_assignments_list) <- names(iterations_list)
+```
+
+Plot the posterior drug densities.
+```{r}  
+drug_posteriors_proportions <- lapply(names(posterior_cell_assignments_list), function(ii) {
+  posterior_cell_assignments_list[[ii]] %>%
+    group_by(drug) %>%
+    summarise(posterior = sum(cell_type=='sensitive')/n()) %>%
+    ungroup()
+}) 
+names(drug_posteriors_proportions) <- names(iterations_list)
+for (num in names(iterations_list)) {
+  drug_type_iterations <- iterations_list[[num]] %>% 
+    map_df("drug_types", .id = "iteration") %>% 
+    bind_rows(drug_types_list[[num]] %>% 
+                mutate(iteration='0')) %>%
+    group_by(iteration) %>%
+    mutate(drug_type_prior = case_when(is.na(drug_type_prior) ~ number/sum(number), TRUE ~ drug_type_prior)) %>%
+    ungroup()
+  drug_fits_iterations <- iterations_list[[num]] %>% 
+    map_df("drug_fits", .id = "iteration") %>% 
+    bind_rows(broad_drug_fits_list[[num]] %>% 
+                mutate(iteration='0') %>%
+                select(drug, drug_type, alpha, beta, iteration),
+              targetted_drug_fits_list[[num]] %>% 
+                mutate(iteration='0') %>%
+                select(drug, drug_type, alpha, beta, iteration))
+  cell_assignments_iterations <- iterations_list[[num]] %>% 
+    map_df("cell_assignments", .id = "iteration") %>% 
+    bind_rows(cell_assignments_list[[num]] %>%
+                mutate(iteration='0'))
+  betadens <- drug_fits_iterations %>%
+    filter(iteration==max(iteration)) %>%
+    mutate(cross = paste(cell_type, drug, sep='_')) %>%
+    plyr::ddply(., "cross", function(df) {
+      data.frame( 
+      value = seq(.001, .999, length = 1000),
+      beta_curve = dbeta(seq(.001, .999, length = 1000), 
+                           df$alpha, 
+                           df$beta) 
+    )
+  })
+  betadens <- as_tibble(betadens) %>% 
+    separate(cross,into=c('cell_type','drug'),sep='_') %>%
+    full_join(drug_fits_iterations %>% mutate(cell_type = ifelse(is.na(cell_type),'NA',cell_type)), by=c('drug','cell_type')) %>% 
+    left_join(drug_posteriors_proportions[[num]], by='drug') %>%
+    mutate(posterior = ifelse(drug_type=='broad',1,posterior)) %>%
+    mutate(posterior = ifelse(drug_type=='targeted' & cell_type=='resistant',1,posterior)) %>%
+    group_by(drug,cell_type) %>% 
+    #mutate(prior = ifelse(prior < .1,.1,prior)) %>%
+    mutate(beta_curve = beta_curve/max(beta_curve)*posterior) %>%
+    ungroup() %>%
+    filter(iteration==max(iteration)) %>%
+    mutate(cell_type = ifelse(cell_type=='sensitive','sensitive','resistant'))
+  nummdrs <- betadens %>% summarise(n_distinct(drug)) %>% pull()
+  drs_array <- betadens %>% distinct(drug) %>% pull()
+  seeqq <- seq(1,nummdrs,by=16)
+  for (dr_chunk in 1:length(seeqq)) {
+    p <- cell_assignments_iterations %>%
+      filter(iteration==max(iteration)) %>%
+      filter(drug %in% drs_array[seeqq[dr_chunk]:(seeqq[dr_chunk]+15)]) %>%
+      ggplot(aes(value,y=..scaled..)) +
+        geom_density(adjust=.5,fill=1) +
+        theme_bw() + 
+        facet_wrap(vars(drug), scales = 'free_y',ncol=4) + 
+        theme(strip.text.x = element_text(size = 8),
+            legend.position='none',
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=12),
+            legend.text=element_text(size=12),
+            legend.title=element_text(size=12),
+            title=element_text(size=14)) + 
+      scale_x_continuous(limits = c(0,1), name=meas) + 
+      geom_line(data=betadens %>% filter(drug %in% drs_array[seeqq[dr_chunk]:(seeqq[dr_chunk]+15)]), aes(y = beta_curve, color=cell_type), lwd = 1) 
+    ggsave(p, file=file.path(opt$log_dir,meas,num,paste('fitted_densities_smoothed_',dr_chunk,'.pdf',sep='')),width = 12, height = 24, units = "in")
+    saveRDS(p, file=file.path(opt$log_dir,meas,num,paste('fitted_densities_smoothed_',dr_chunk,'.RDS',sep='')))
+    while(dev.cur()!=1) {dev.off()}
+  }
+  dir.create(file.path(opt$log_dir,meas,num,'fitted_densities_by_drug'),showWarnings = FALSE)
+  for (dr in unique(cell_assignments_iterations$drug)) {
+    dr_type <- cell_assignments_iterations %>%
+      filter(iteration==max(iteration),drug==dr) %>% 
+      distinct(drug_type) %>% 
+      pull
+    dr_short <- gsub("[^[:alnum:]]","",dr)
+    dr_nonums <- gsub('[0-9]+', '', dr_short)
+    if (nchar(dr_nonums)==0) {dr_short <- paste('drug',dr_short,sep='')}
+    p <- cell_assignments_iterations %>%
+      filter(iteration==max(iteration),drug==dr) %>%
+      ggplot(aes(value,y=..scaled..)) +
+        geom_density(adjust=.5,fill=1) +
+        theme_bw() + 
+        theme(strip.text.x = element_text(size = 18),
+          legend.position='none',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=16),
+          title=element_text(size=18)) +
+      scale_x_continuous(limits = c(0,1)) + 
+      labs(y='Scaled Density',x='AOC') +
+      geom_line(data=betadens %>% filter(drug==dr), aes(y = beta_curve, color=cell_type), lwd = 1.5) +
+      ggtitle(paste(dr,sep=' '))
+    ggsave(file=file.path(opt$log_dir,meas,num,'fitted_densities_by_drug',paste(dr_short,'.png',sep='')),width = 12, height = 4, units = "in")
+    saveRDS(p, file.path(opt$log_dir,meas,num,'fitted_densities_by_drug',paste(dr_short,'.RDS',sep='')))
+  }
+}
+```
+
+Extract intersection data.
+```{r}
+  intersection.fitted.list <- lapply(intersection.tibble.list, function(tibb) {
+    drugs_cells <- tibb %>% 
+      distinct(drug,cell)
+    experiments <- tibb %>% 
+      distinct(experiment) %>%
+      pull
+    newtibb <- NULL
+    for (exp in experiments) {
+      iter <- iterations_list[[exp]] %>% 
+        map_df("cell_assignments", .id = "iteration") %>%
+        filter(iteration == max(iteration))
+      newtibb <- bind_rows(newtibb,drugs_cells %>% 
+        left_join(iter, by=c('drug','cell')))
+    }
+    return(newtibb)
+  })
+```
+
+Format posterior agreements.
+```{r}
+  posterior_drug_types <- do.call(bind_rows,posterior_drug_types_list) %>%
+    mutate(experiment=rep(names(iterations_list),each=2)) 
+  nums <- sapply(posterior_drug_assignments_list, nrow)
+  posterior_drug_assignments <- do.call(bind_rows,posterior_drug_assignments_list) %>%
+      mutate(experiment=rep(names(iterations_list),times=nums))
+  nums <- sapply(posterior_drug_fits_list, nrow)
+  posterior_drug_fits <-  do.call(bind_rows,posterior_drug_fits_list) %>%
+      mutate(experiment=rep(names(iterations_list),times=nums))
+  nums <- sapply(posterior_cell_assignments_list, nrow)
+  posterior_cell_assignments <- do.call(bind_rows,posterior_cell_assignments_list) %>%
+      mutate(experiment=rep(names(iterations_list),times=nums))
+```
+
+Save posteriors.
+```{r}
+saveRDS(object=posterior_drug_types,file=file.path(opt$log_dir,'posterior_drug_types.RDS'))
+saveRDS(object=posterior_drug_fits,file=file.path(opt$log_dir,'posterior_drug_fits.RDS'))
+saveRDS(object=posterior_drug_assignments,file=file.path(opt$log_dir,'posterior_drug_assignments.RDS'))
+saveRDS(object=posterior_cell_assignments,file=file.path(opt$log_dir,'posterior_cell_assignments.RDS'))
+saveRDS(object=intersection.fitted.list,file=file.path(opt$log_dir,'intersection.fitted.list.RDS'))
+```
+
+Format a big data frame with all relevant posterior information.
+```{r}
+posterior_cell_assignments <- readRDS(file=file.path(opt$log_dir,'posterior_cell_assignments.RDS'))
+posterior_drug_assignments <- readRDS(file=file.path(opt$log_dir,'posterior_drug_assignments.RDS'))
+
+posterior <- posterior_cell_assignments %>%
+  select(drug, cell, experiment, drug_type, cell_type, posterior, likelihood, value) %>%
+  rename(cell_type_posterior=posterior,
+         cell_type_likelihood=likelihood,
+         realized_value=value) %>%
+  group_by(drug, cell) %>% 
+  mutate(num_experiments = n_distinct(experiment)) %>%
+  ungroup() %>%
+  left_join(posterior_drug_assignments %>%
+              select(drug, p_prior, drug_type, posterior,likelihood) %>%
+              rename(drug_type_posterior=posterior,
+                     drug_type_likelihood=likelihood), by=c('drug_type','drug')) %>%
+  mutate(cell_type = ifelse(cell_type == 'sensitive' & drug_type == 'broad',
+                            'resistant',cell_type)) %>% #filter(drug==dr) %>% View
+  mutate(cell_type_posterior = ifelse((cell_type == 'resistant' & drug_type == 'targeted') | drug_type=='broad',
+                                      1-cell_type_posterior,cell_type_posterior)) %>%
+  mutate(drug_type_posterior = ifelse(drug_type == 'broad', 1-drug_type_posterior,drug_type_posterior)) %>%
+  rename(posterior_probability_sensitive = cell_type_posterior,
+         posterior_probability_targeted = drug_type_posterior)
+saveRDS(object=posterior,file=file.path(opt$log_dir,'posterior.formatted.RDS'))
+```
+
+Posterior drug type density plot.
+```{r}
+p <- posterior_drug_types %>% 
+  crossing(x = seq(.001, .999, .001)) %>%
+  group_by(experiment) %>%
+  mutate(posterior = number/sum(number)) %>%
+  ungroup() %>%
+    mutate(density = posterior * dbeta(x, alpha, beta)) %>%
+    ggplot(aes(x, density, color = drug_type, group = drug_type)) +
+    geom_line() +
+    facet_wrap(~ experiment,ncol=1) + 
+    theme_bw() + 
+        theme(strip.text.x = element_text(size = 18),
+          legend.position='bottom',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=18),
+          legend.title=element_text(size=18),
+          title=element_text(size=18)) +
+    labs(colour="Drug Type",y='Density',x='AOC') + 
+    scale_x_continuous(limits = c(0,1), breaks=c(0,.5,1)) + 
+    ggtitle('Posterior Drug-Type Densities')
+  ggsave(p, file=file.path(opt$log_dir,meas,paste('posterior_drug_types.pdf',sep='')),width = 12, height = 8, units = "in")
+  saveRDS(p, file.path(opt$log_dir,meas,paste('posterior_drug_types.RDS',sep='')))
+```
+
+Compute pairwise posterior drug assignments agreement.
+```{r}
+pairwise_drug_agreements <- tibble()
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+    pairwise_drug_agreements <- posterior_drug_assignments %>% 
+      filter(experiment %in% combos[combo,]) %>%
+      select(drug:measure,posterior, drug_type,experiment) %>% 
+      unite(temp,drug,measure,experiment,sep='__') %>%
+      gather(key=var,value=val,-temp) %>% 
+      separate(temp,into=c('drug','measure','experiment'),sep='__') %>%
+      unite(var,experiment,var) %>%
+      spread(var,val) %>% 
+      na.omit %>%
+      mutate_at(vars(paste(combos[combo,1],'posterior',sep='_'),paste(combos[combo,2],'posterior',sep='_')),as.numeric) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+      mutate(agreement = case_when(Called!='Disagree' ~ eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               TRUE ~ (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))))) %>%
+      select(drug, measure,agreement, Called) %>% 
+      mutate(Intersection = comp, Comparison=paste(combos[combo,1],combos[combo,2],sep='_')) %>%
+      bind_rows(pairwise_drug_agreements)
+  }
+}
+```
+
+Pairwise posterior drug assignments plots.
+```{r}
+library(ggrepel)
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+  p <- posterior_drug_assignments %>% 
+    filter(experiment %in% combos[combo,]) %>%
+    mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                 drug_type=='targeted' ~ posterior)) %>%
+    select(drug:measure,posterior, drug_type,experiment) %>% 
+    unite(temp,drug,measure,experiment,sep='__') %>%
+    gather(key=var,value=val,-temp) %>% 
+    separate(temp,into=c('drug','measure','experiment'),sep='__') %>%
+    unite(var,experiment,var) %>%
+    spread(var,val) %>% 
+    na.omit %>%
+    mutate_at(vars(paste(combos[combo,1],'posterior',sep='_'),paste(combos[combo,2],'posterior',sep='_')),as.numeric) %>%
+    mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+    mutate(Agreement=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                               g1==g2 & g1 == 'targeted'~'Targeted',
+                               TRUE~ 'Disagree')) %>%
+    ggplot(aes_string(x=paste(combos[combo,1],'posterior',sep='_'),
+                y=paste(combos[combo,2],'posterior',sep='_'), 
+                color = 'Agreement', 
+                label='drug')) +
+      geom_point() +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+            legend.position='bottom',
+            axis.text=element_text(size=16),
+            axis.title=element_text(size=18),
+            legend.text=element_text(size=18),
+            legend.title=element_text(size=0),
+            title=element_text(size=18)) +
+      labs(y=combos[combo,2],x=combos[combo,1]) + 
+      scale_x_continuous(limits = c(0,1), breaks=c(0,.5,1)) + 
+      scale_y_continuous(limits = c(0,1), breaks=c(0,.5,1)) + 
+      ggtitle('Posterior Probability of Targeted')
+  ggsave(p,file=file.path(opt$log_dir,meas,comp,paste('posterior_drug_types_individual.pdf',sep='')),width = 12, height = 8, units = "in")
+  saveRDS(p, file.path(opt$log_dir,meas,comp,paste('posterior_drug_types_individual.RDS',sep='')))
+  }
+}
+```
+
+Compute pairwise posterior cell agreement.
+```{r}
+pairwise_cell_agreements <- tibble()
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+    pairwise_cell_agreements <- intersection.fitted.list[[comp]] %>%
+      filter(experiment %in% combos[combo,]) %>% 
+      #filter(drug=='TAE684') %>%
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      mutate(posterior = case_when(posterior==1 ~ .99,posterior==0 ~ .01,TRUE ~ posterior)) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>% 
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) %>%
+      group_by(drug, cell, measure) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>% 
+      mutate(agreement = eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))))) %>% 
+      mutate(Intersection = comp, Comparison=paste(combos[combo,1],combos[combo,2],sep='_')) %>%
+      select(cell,drug,measure,agreement,Called, Intersection, Comparison) %>%
+      bind_rows(pairwise_cell_agreements) 
+  }
+}
+```
+
+2-way concordance plots between studies for only those drugs/cells in the intersection, colored by posterior agreement.
+```{r}
+for (comp in names(intersection.fitted.list)) {
+  dir.create(file.path(opt$log_dir,meas,comp,'by_drug'),showWarnings = FALSE)
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+    p <- intersection.fitted.list[[comp]] %>%
+      filter(experiment %in% combos[combo,]) %>% 
+      mutate(posterior = case_when(posterior==1 ~ .99,posterior==0 ~ .01,TRUE ~ posterior)) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>%
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) %>%
+      group_by(drug, cell, measure) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+      mutate(agreement = eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))))) %>%
+      ggplot(aes_string(x=paste(combos[combo,1],'value',sep='_'),
+                        y=paste(combos[combo,2],'value',sep='_'))) + 
+      geom_point(aes(color=agreement),alpha=.5,size=4) + 
+      scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50') + 
+      theme_bw() + 
+      facet_wrap(vars(drug),ncol=3) + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+      scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('2way_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 10, height = 18, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('2way_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    drugs <- unique(intersection.fitted.list[[comp]]$drug)
+    for (dr in drugs) {
+      dr_short <- gsub("[^[:alnum:]]","",dr)
+      dr_nonums <- gsub('[0-9]+', '', dr_short)
+      if (nchar(dr_nonums)==0) {dr_short <- paste('drug',dr_short,sep='')}
+      p <- intersection.fitted.list[[comp]] %>%
+      mutate(posterior = case_when(posterior==1 ~ .99,posterior==0 ~ .01,TRUE ~ posterior)) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>%
+      filter(experiment %in% combos[combo,],drug==dr) %>% 
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) %>%
+      group_by(drug, cell, measure) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+      mutate(agreement = case_when(Called!='Disagree' ~ eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               Called=='Disagree' & g1 == 'broad' ~
+                 (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) +
+                eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               Called=='Disagree' & g2 == 'broad' ~
+                 (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) +
+                 eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               TRUE ~ eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))))) %>%
+      ggplot(aes_string(x=paste(combos[combo,1],'value',sep='_'),
+                        y=paste(combos[combo,2],'value',sep='_'))) + 
+      geom_point(aes(color=agreement),alpha=.5,size=4) + 
+      scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) + 
+      theme_bw() + 
+      ggtitle(paste(dr,'Posterior Agreement')) +
+      theme(strip.text.x = element_text(size = 12),
+          legend.position='top',
+          axis.text=element_text(size=12),
+          axis.title=element_text(size=12),
+          legend.text=element_text(size=12),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x=combos[combo,1],y=combos[combo,2]) + 
+      scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+      scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1))
+    ggsave(p,file=file.path(opt$log_dir,meas,comp,'by_drug',paste(dr_short,'_posterior_',
+                                            combos[combo,1],'_',combos[combo,2],
+                                            '.pdf',sep='')),
+           width = 12, height = 8, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,'by_drug',paste(dr_short,'_posterior_',
+                                            combos[combo,1],'_',combos[combo,2],
+                                            '.RDS',sep='')))
+    p <- intersection.fitted.list[[comp]] %>%
+      mutate(posterior = case_when(posterior==1 ~ .99,posterior==0 ~ .01,TRUE ~ posterior)) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>%
+      filter(experiment %in% combos[combo,],drug==dr) %>% 
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) %>%
+      group_by(drug, cell, measure) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+      mutate(agreement = case_when(Called!='Disagree' ~ eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               Called=='Disagree' & g1 == 'broad' ~
+                 (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) +
+                eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               Called=='Disagree' & g2 == 'broad' ~
+                 (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) +
+                 eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))),
+               TRUE ~ eval(parse(text=paste(combos[combo,1],'posterior',sep='_')))*
+               eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))) + 
+                (1-eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))))*
+                (1-eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))))) %>%
+      ggplot(aes_string(x=paste(combos[combo,1],'posterior',sep='_'),
+                        y=paste(combos[combo,2],'posterior',sep='_'))) + 
+      geom_point(aes(color=agreement),alpha=.5,size=4) + 
+      scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) + 
+      theme_bw() + 
+      ggtitle(paste(dr,'Posterior probability sensitive')) +
+      theme(strip.text.x = element_text(size = 12),
+          legend.position='top',
+          axis.text=element_text(size=12),
+          axis.title=element_text(size=12),
+          legend.text=element_text(size=12),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x=combos[combo,1],y=combos[combo,2]) + 
+      scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
+      scale_y_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1))
+    ggsave(p,file=file.path(opt$log_dir,meas,comp,'by_drug',paste(dr_short,'_posterior_probsens_',
+                                            combos[combo,1],'_',combos[combo,2],
+                                            '.pdf',sep='')),
+           width = 12, height = 8, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,'by_drug',paste(dr_short,'_posterior_probsens_',
+                                            combos[combo,1],'_',combos[combo,2],
+                                            '.RDS',sep='')))
+    }
+  }
+}
+```
+
+Compute study agreements.
+```{r}
+pairwise_study_agreements <- tibble()
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+   tdat <- intersection.fitted.list[[comp]] %>%
+      filter(experiment %in% combos[combo,]) %>% 
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) 
+   corrdat <- tdat %>%
+      na.omit() %>%
+      group_by(drug, measure) %>%
+      summarise(pearson_corr = cor(eval(parse(text=paste(combos[combo,1],'value',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'value',sep='_'))),
+                                method='pearson'),
+             spearman_corr = cor(eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))),
+                                method='spearman')) %>%
+      ungroup()
+   lordat <- tdat %>% 
+       group_by(drug, measure) %>% 
+       na.omit() %>%
+       mutate(Drug_type = case_when((eval(parse(text=paste(combos[combo,1],'drug_type',sep='_')))=='broad') & 
+                                 (eval(parse(text=paste(combos[combo,2],'drug_type',sep='_')))=='broad') ~ 'Broad',
+                                 (eval(parse(text=paste(combos[combo,1],'drug_type',sep='_')))=='targeted') & 
+                                 (eval(parse(text=paste(combos[combo,2],'drug_type',sep='_')))=='targeted') ~ 'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+       summarise(Drug_type = first(Drug_type),
+                 t00 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='resistant') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='resistant')),
+                 t11 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='sensitive') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='sensitive')),
+                 t01 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='resistant') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='sensitive')),
+                 t10 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='sensitive') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='resistant'))) %>%
+       mutate(t00 = t00+.5,
+              t11 = t11+.5,
+              t10 = t10+.5,
+              t01 = t01+.5) %>% 
+       ungroup() %>%
+       mutate(LOR = log((t00*t11)/(t01*t10)),
+              SE_LOR = sqrt(((1/t00)+(1/t11)+(1/t01) + (1/t10))),
+              MCC = (t00*t11-t01*t10)/sqrt((t11+t01)*(t11+t10)*(t00+t10)*(t00+t01)))
+     measuredat <- corrdat %>% 
+       left_join(lordat, by=c('drug','measure'))
+     pairwise_study_agreements <- measuredat %>% 
+       mutate(Intersection = comp, Comparison=paste(combos[combo,1],combos[combo,2],sep='_')) %>% 
+       bind_rows(pairwise_study_agreements)
+  }
+}
+```
+
+Calculate probability agree under varying thresholds and calculate AUC. Plot these.
+```{r}
+auc_prob <- tibble()
+for (thresh in seq(0,1,by=.01)) {
+  tdat <- pairwise_cell_agreements %>%
+    group_by(drug, measure, Called, Intersection, Comparison) %>%
+    summarise(Probability_agree = sum(agreement>=thresh)/n()) %>% 
+    ungroup() %>%
+    mutate(threshold=thresh)
+  auc_prob <- auc_prob %>% bind_rows(tdat)
+}
+p50_prob <- auc_prob %>% 
+  filter(threshold==.5)
+
+auc_prob %>% 
+  filter(threshold==.9, Called=='Targeted') %>%
+  ggplot(aes(x=reorder(drug,Probability_agree),y=Probability_agree,fill=Called),color='black') + 
+  geom_bar(stat = "identity", width = 0.5) +
+  theme_bw() + 
+  scale_fill_brewer(palette='Dark2') +
+  coord_flip() + 
+  theme(legend.position = 'none') +
+  labs(fill='', title='Posterior probability of cell agreement',subtitle='Posteriors computed on full CCLE and GDSC datasets') +
+  ylab('Probability(Agreement)') +
+  xlab('Drug')
+  
+
+auc_prob <- auc_prob %>%
+  group_by(drug) %>%
+  do(auc = pracma::trapz(x=.$threshold,y=.$Probability_agree)) %>%
+  mutate(auc = abs(unlist(auc))) %>%
+  right_join(auc_prob, by='drug')
+
+pairwise_study_agreements <- pairwise_study_agreements %>%
+  left_join(auc_prob %>% distinct(drug, auc), by='drug') %>%
+  left_join(p50_prob %>% distinct(drug, Probability_agree), by='drug')
+
+pairwise_study_agreements %>%
+  mutate(auc = case_when(Drug_type != 'Targeted' ~ pearson_corr,
+                         TRUE ~ auc)) %>%
+  ggplot(aes(x=reorder(drug,auc),y=pearson_corr,color=Drug_type, fill=Comparison)) + 
+  geom_bar(stat = "identity", width = 0.5) +
+  theme_bw() + 
+  scale_fill_brewer(palette='Blues') +
+  coord_flip() + 
+  theme(legend.position = 'none') +
+  labs(fill='', title='Pearson correlation',subtitle='Only intersected CCLE and GDSC datasets considered') +
+  ylab('Correlation') +
+  xlab('Drug') +
+  ylim(0,1) +
+  scale_color_manual(values=c(Targeted='blue',Disagree='red',Broad='red')) 
+
+p <- auc_prob %>%
+  filter(Called=='Targeted') %>%
+  ggplot(aes(x=threshold,y=Probability_agree,color=Comparison)) +
+  geom_line() +
+  facet_wrap(vars(drug),ncol=5) + 
+  theme_bw() + 
+  theme(legend.position='top') +
+  geom_abline(aes(slope=-1, intercept = 1), lwd = 1, lty=2) 
+ggsave(p, file=file.path(opt$log_dir,meas,paste('auc_drug_level.png',sep='')),width = 12, height = 12, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('auc_drug_level.RDS',sep='')))
+
+p <- auc_prob %>% 
+  filter(threshold==.5) %>% 
+  ggplot(aes(x=Probability_agree, y=auc, label=drug, color=Called)) + 
+  geom_point() +
+  geom_text_repel() + 
+  theme(legend.position='top') +
+  theme_bw()
+ggsave(p, file=file.path(opt$log_dir,meas,paste('auc_prob50.pdf',sep='')),width = 8, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('auc_prob50.RDS',sep='')))
+```
+
+Save cell, drug, and study agreements.
+```{r}
+saveRDS(object=pairwise_cell_agreements,file=file.path(opt$log_dir,'pairwise_cell_agreements.RDS'))
+saveRDS(object=pairwise_drug_agreements,file=file.path(opt$log_dir,'pairwise_drug_agreements.RDS'))
+saveRDS(object=pairwise_study_agreements,file=file.path(opt$log_dir,'pairwise_study_agreements.RDS'))
+```
+
+Plot pairwise correlations between sensitivity measures across drugs.
+```{r}
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+   tdat <- intersection.fitted.list[[comp]] %>%
+      filter(experiment %in% combos[combo,]) %>% 
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      mutate(posterior = case_when(drug_type=='broad' ~ 1-posterior,
+                                   drug_type=='targeted' & cell_type=='resistant' ~ 1-posterior,
+                                   TRUE ~ posterior)) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),list(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),list(as.numeric)) 
+   corrdat <- tdat %>%
+      group_by(drug, measure) %>% 
+      summarise(pearson_corr = cor(eval(parse(text=paste(combos[combo,1],'value',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'value',sep='_'))),
+                                method='pearson'),
+             spearman_corr = cor(eval(parse(text=paste(combos[combo,1],'value',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'value',sep='_'))),
+                                method='spearman'),
+             pearson_corr_posterior = cor(eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))),
+                                method='pearson'),
+             spearman_corr_posterior = cor(eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))),
+                                eval(parse(text=paste(combos[combo,2],'posterior',sep='_'))),
+                                method='spearman')) %>%
+      ungroup()
+     lordat <- tdat %>% 
+       group_by(drug, measure) %>% 
+       mutate(Drug_type = case_when((eval(parse(text=paste(combos[combo,1],'drug_type',sep='_')))=='broad') & 
+                                 (eval(parse(text=paste(combos[combo,2],'drug_type',sep='_')))=='broad') ~ 'Broad',
+                                 (eval(parse(text=paste(combos[combo,1],'drug_type',sep='_')))=='targeted') & 
+                                 (eval(parse(text=paste(combos[combo,2],'drug_type',sep='_')))=='targeted') ~ 'Targeted',
+                                 TRUE ~ 'Disagree')) %>%
+       summarise(Drug_type = first(Drug_type),
+                 t00 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='resistant') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='resistant')),
+                 t11 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='sensitive') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='sensitive')),
+                 t01 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='resistant') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='sensitive')),
+                 t10 = sum((eval(parse(text=paste(combos[combo,1],'cell_type',sep='_')))=='sensitive') &
+                           (eval(parse(text=paste(combos[combo,2],'cell_type',sep='_')))=='resistant'))) %>%
+       mutate(t00 = t00+.5,
+              t11 = t11+.5,
+              t10 = t10+.5,
+              t01 = t01+.5) %>% 
+       ungroup() %>%
+       mutate(LOR = log((t00*t11)/(t01*t10)),
+              SE_LOR = sqrt(((1/t00)+(1/t11)+(1/t01) + (1/t10))),
+              MCC = (t00*t11-t01*t10)/sqrt((t11+t01)*(t11+t10)*(t00+t10)*(t00+t01)))
+     lordat_naive <- tdat %>% 
+       group_by(drug, measure) %>% 
+       mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901','AZD6244') ~ 'Broad',
+                                    TRUE ~ 'Targeted')) %>%
+       summarise(Drug_type_naive = first(Drug_type_naive),
+                 t00 = sum(((eval(parse(text=paste(combos[combo,1],'value',sep='_')))<=.2 & Drug_type_naive=='Targeted') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))<=.2)) | 
+                           ((eval(parse(text=paste(combos[combo,1],'value',sep='_')))<=.4 & Drug_type_naive=='Broad') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))<=.4))),
+                 t11 = sum(((eval(parse(text=paste(combos[combo,1],'value',sep='_')))>.2 & Drug_type_naive=='Targeted') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))>.2)) | 
+                           ((eval(parse(text=paste(combos[combo,1],'value',sep='_')))>.4 & Drug_type_naive=='Broad') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))>.4))),
+                 t01 = sum(((eval(parse(text=paste(combos[combo,1],'value',sep='_')))<=.2 & Drug_type_naive=='Targeted') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))>.2)) | 
+                           ((eval(parse(text=paste(combos[combo,1],'value',sep='_')))<=.4 & Drug_type_naive=='Broad') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))>.4))),
+                 t10 = sum(((eval(parse(text=paste(combos[combo,1],'value',sep='_')))>.2 & Drug_type_naive=='Targeted') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))<=.2)) | 
+                           ((eval(parse(text=paste(combos[combo,1],'value',sep='_')))>.4 & Drug_type_naive=='Broad') &
+                           (eval(parse(text=paste(combos[combo,2],'value',sep='_')))<=.4)))) %>%
+       mutate(t00 = t00+.5,
+              t11 = t11+.5,
+              t10 = t10+.5,
+              t01 = t01+.5) %>% 
+       ungroup() %>%
+       mutate(LOR_naive = log((t00*t11)/(t01*t10)),
+              SE_LOR_naive = sqrt(((1/t00)+(1/t11)+(1/t01) + (1/t10))),
+              MCC_naive = (t00*t11-t01*t10)/sqrt((t11+t01)*(t11+t10)*(t00+t10)*(t00+t01))) %>% 
+       select(-t00,-t11,-t10,-t01)
+     measuredat <- corrdat %>% 
+       left_join(lordat, by=c('drug','measure')) %>%
+       left_join(auc_prob %>% filter(Comparison==paste(combos[combo,1],combos[combo,2],sep='_'),
+                                     Intersection == comp) %>%
+                   distinct(drug,measure,auc),
+                 by=c('drug','measure'))
+     measuredat_naive <- corrdat %>% 
+       left_join(lordat_naive, by=c('drug','measure')) %>%
+       left_join(auc_prob %>% filter(Comparison==paste(combos[combo,1],combos[combo,2],sep='_'),
+                                     Intersection == comp) %>%
+                   distinct(drug,measure,auc),
+                 by=c('drug','measure'))
+     lordat_naive <- lordat %>% 
+       select(-t00,-t11,-t10,-t01) %>%
+       left_join(lordat_naive, by=c('drug','measure'))  %>%
+       left_join(auc_prob %>% filter(Comparison==paste(combos[combo,1],combos[combo,2],sep='_'),
+                                     Intersection == comp) %>%
+                   distinct(drug,measure,auc),
+                 by=c('drug','measure'))
+     
+    # spearman vs pearson, original sensitivity measure
+    p <-  measuredat_naive %>% 
+       mutate(mycolor = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'red',
+                                  TRUE ~ 'black')) %>%
+      ggplot(aes(x=spearman_corr,y=pearson_corr,label=drug)) + 
+      geom_point(aes(color=mycolor), show.legend=FALSE,alpha=.8,size=4) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=24)) +
+      scale_color_manual(values=c(red='red',black='black')) +
+      xlim(c(-.1,1)) + ylim(c(-.1,1)) +
+      labs(x='Spearman',y='Pearson', title='Continuous measures of agreement',subtitle='Associations for commonly-assayed cells and drugs') 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_Pearson_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.png',sep='')),
+         width = 12, height = 12, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_Pearson_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman vs pearson, posterior sensitivity measure
+    p <- ggplot(measuredat %>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=spearman_corr_posterior,y=pearson_corr_posterior,label=drug)) + 
+      geom_point(aes(color=Drug_type),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based Spearman',y='Model-based Pearson') +
+      xlim(c(-.1,1)) + ylim(c(-.1,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_Pearson_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_Pearson_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman vs posterior
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=spearman_corr,y=spearman_corr_posterior,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Spearman',y='Model-based Spearman') +
+      xlim(c(-.1,1)) + ylim(c(-.1,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_Spearman_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_Spearman_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # pearson vs posterior
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=pearson_corr,y=pearson_corr_posterior,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Pearson',y='Model-based Pearson') +
+      xlim(c(-.1,1)) + ylim(c(-.1,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Pearson_Pearson_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Pearson_Pearson_posterior_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # log-odds naive v log-odds
+    p <- ggplot(lordat_naive, aes(x=LOR_naive,y=LOR,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Log-odds ratio',y='Model-based log-odds ratio') +
+      xlim(c(0,10)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # log-odds naive v MCC naive
+    p <- ggplot(lordat_naive, aes(x=LOR_naive,y=MCC_naive,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Log-odds ratio',y='MCC') +
+      xlim(c(0,10)) + ylim(c(0,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_LOR_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_LOR_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman naive v MCC naive
+    p <- ggplot(measuredat_naive %>% 
+       mutate(mycolor = case_when(drug %in% c('Nilotinib','PLX4720','Crizotinib') ~ 'purple',
+                                  drug %in% c('PD-0325901','17-AAG') ~ 'green',
+                                  drug %in% c('PHA-665752','Nutlin-3') ~ 'red',
+                                  TRUE ~ 'blue')), aes(x=spearman_corr,y=MCC_naive,label=drug)) + 
+      geom_point(aes(color=mycolor),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=24)) +
+      labs(x='Spearman Correlation',y='Matthews Correlation', title='Alternate measures of agreement',subtitle='Associations for commonly-assayed cells and drugs') +
+      xlim(c(0-.1,1)) + ylim(c(0,1)) + 
+      scale_color_manual(values=c(purple='purple',green='green',red='red',blue='blue')) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_Spearman_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.png',sep='')),
+         width = 12, height = 12, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_Spearman_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # pearson naive v MCC naive
+    p <- ggplot(measuredat_naive %>% 
+       mutate(mycolor = case_when(drug %in% c('Nilotinib','PLX4720','Crizotinib-0325901') ~ 'purple',
+                                  drug %in% c('PD-0325901','17-AAG') ~ 'green',
+                                  drug %in% c('PHA-66752','Nutlin-3') ~ 'red',
+                                  TRUE ~ 'blue')), aes(x=pearson_corr,y=MCC_naive,label=drug)) + 
+      geom_point(aes(color=mycolor),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=24)) +
+      labs(x='Pearson Correlation',y='Matthews Correlation', title='Continuous measures of agreement',subtitle='Associations for commonly-assayed cells and drugs') +
+      xlim(c(0,1)) + ylim(c(0,1)) + 
+      scale_color_manual(values=c(purple='purple',green='green',red='red',blue='blue')) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_Pearson_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.png',sep='')),
+         width = 12, height = 12, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_Pearson_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # LO naive v MCC naive
+    p <- ggplot(measuredat_naive %>% 
+       mutate(mycolor = case_when(drug %in% c('Nilotinib','PLX4720','Crizotinib') ~ 'purple',
+                                  drug %in% c('PD-0325901','17-AAG') ~ 'green',
+                                  drug %in% c('PHA-665752','Nutlin-3') ~ 'red',
+                                  TRUE ~ 'blue')), aes(x=LOR_naive,y=MCC_naive,label=drug)) + 
+      geom_point(aes(color=mycolor),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=24)) +
+      labs(x='Log-Odds',y='Matthews Correlation', title='Binary measures of agreement',subtitle='Associations for commonly-assayed cells and drugs') +
+      ylim(c(0,1)) + 
+      scale_color_manual(values=c(purple='purple',green='green',red='red',blue='blue')) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_LO_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.png',sep='')),
+         width = 12, height = 12, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_LO_Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # MCC naive v MCC
+    p <- ggplot(lordat_naive%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901',
+                                                                             'TAE684','AZD6244','PD-0332991') ~ 'Broad effect')),
+                                                                 aes(x=MCC_naive,y=MCC,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      geom_abline(aes(slope=1,intercept=0),lty=2) +
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='MCC',y='Model-based MCC') +
+      xlim(c(0,1)) + ylim(c(0,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Naive_MCC_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # posterior MCC v posterior LO
+    p <- ggplot(lordat_naive, aes(x=LOR,y=MCC,label=drug)) + 
+      geom_point(aes(color=Drug_type),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based Log-odds',y='Model-based MCC') +
+      xlim(c(0,10)) + ylim(c(0,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('LOR_MCC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('LOR_MCC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # posterior MCC v posterior auc
+    p <- ggplot(lordat_naive, aes(x=MCC,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based MCC',y='Model-based AUC') +
+      xlim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('MCC_AUC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('MCC_AUC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # posterior LO v posterior auc
+    p <- ggplot(lordat_naive, aes(x=LOR,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based Log-odds',y='Model-based AUC') +
+      xlim(c(0,10)) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('LOR_AUC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('LOR_AUC_model_fit',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman v auc
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=spearman_corr,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Spearman',y='Model-based AUC') +
+      xlim(c(-.1,1)) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 8, height = 8, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # model based spearman v auc
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=spearman_corr_posterior,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based Spearman',y='Model-based AUC') +
+      xlim(c(-.1,1)) 
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_posterior_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 8, height = 8, units = "in")
+    # model based pearson v auc
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=pearson_corr_posterior,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Model-based Pearson',y='Model-based AUC') +
+      xlim(c(-.1,1)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Pearson_posterior_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 8, height = 8, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman v log-odds
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=spearman_corr,y=LOR,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=.8,size=4) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Spearman',y='Model-based log-odds ratio') +
+      xlim(c(-.1,1)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 8, height = 8, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # spearman v naive log-odds
+    p <- ggplot(measuredat_naive, aes(x=spearman_corr,y=LOR_naive,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),show.legend=FALSE,alpha=1,size=2) +
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Spearman',y='Log-odds ratio') +
+      xlim(c(-.1,1)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Spearman_LOR_naive_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Spearman_LOR_naive_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # pearson v auc
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901',
+                                                                             'TAE684','AZD6244','PD-0332991') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=pearson_corr,y=auc,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Pearson',y='Model-based AUC') +
+      xlim(c(-.1,1)) + ylim(c(0,1))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Pearson_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.png',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Pearson_auc_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # pearson v log-odds
+    p <- ggplot(measuredat%>% mutate(Drug_type_naive = case_when(drug %in% c('17-AAG','paclitaxel','PD-0325901') ~ 'Broad effect',
+                                    TRUE ~ 'Narrow effect')), aes(x=pearson_corr,y=LOR,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Pearson',y='Model-based log-odds ratio') +
+      xlim(c(-.1,1)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Pearson_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Pearson_LOR_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+    # pearson v naive log-odds
+    p <- ggplot(measuredat_naive, aes(x=pearson_corr,y=LOR_naive,label=drug)) + 
+      geom_point(aes(color=Drug_type_naive),alpha=.8,size=4,show.legend=FALSE) + 
+      geom_text_repel(show.legend=FALSE,size=5) + 
+      theme_bw() + 
+      theme(strip.text.x = element_text(size = 18),
+          legend.position='top',
+          axis.text=element_text(size=16),
+          axis.title=element_text(size=18),
+          legend.text=element_text(size=16),
+          legend.title=element_text(size=0),
+          title=element_text(size=14)) +
+      labs(x='Pearson',y='Log-odds ratio') +
+      xlim(c(-.1,1)) + ylim(c(0,10))
+    ggsave(p, file=file.path(opt$log_dir,meas,comp,paste('Pearson_LOR_naive_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.pdf',sep='')),
+         width = 5, height = 5, units = "in")
+    saveRDS(p,file.path(opt$log_dir,meas,comp,paste('Pearson_LOR_naive_',
+                                          combos[combo,1],'_',combos[combo,2],
+                                          '.RDS',sep='')))
+  }
+}
+```
+
+Plot agreements for all pairwise study comparisons.
+```{r}
+p <- pairwise_study_agreements %>% 
+  mutate(Drug_type = ifelse(Drug_type == 'Targeted','AUC','Spearman')) %>%
+  filter(Drug_type == 'AUC') %>%
+  group_by(Comparison) %>%
+  arrange(desc(auc)) %>%
+  mutate(label = ifelse(row_number() %in% c(1:3,n()),drug,'')) %>%
+  ungroup() %>%
+  ggplot(aes(x=spearman_corr,y=auc,color=Comparison,label=label)) +
+  geom_point(alpha=.5,size=1.5) +
+  geom_text_repel(show.legend=FALSE,size=4) +
+  theme_bw() 
+ggsave(p, file=file.path(opt$log_dir,meas,paste('pairwise_study_agreements_targeted.pdf',sep='')),width = 8, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('pairwise_study_agreements_targeted.RDS',sep='')))
+p <- pairwise_study_agreements %>% 
+  mutate(Drug_type = ifelse(Drug_type == 'Targeted','AUC','{Pearson')) %>%
+  filter(Drug_type == 'Pearson') %>%
+  group_by(Comparison) %>%
+  arrange(desc(pearson_corr)) %>%
+  mutate(label = ifelse(row_number() %in% c(1:3,n()),drug,'')) %>%
+  ungroup() %>%
+  ggplot(aes(x=spearman_corr,y=pearson_corr,color=Comparison,label=label)) +
+  geom_point(alpha=.5,size=1.5) +
+  geom_text_repel(show.legend=FALSE,size=4) +
+  theme_bw() 
+ggsave(p, file=file.path(opt$log_dir,meas,paste('pairwise_study_agreements_broad.pdf',sep='')),width = 8, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('pairwise_study_agreements_broad.RDS',sep='')))
+```
+
+Plot density agreements for all pairwise cell comparisons.
+```{r}
+p <- pairwise_cell_agreements %>% 
+  ungroup() %>%
+  mutate(Drug_type = ifelse(Called == 'Targeted','Targeted','Broad')) %>%
+  filter(Drug_type=='Targeted') %>%
+  mutate(drug=as.factor(drug)) %>% 
+  mutate(drug=reorder(drug, agreement, mean)) %>%
+  ggplot(aes(x=agreement,y=drug, fill = Comparison),show.legend=FALSE) +
+  geom_density_ridges(alpha = .2, show.legend=FALSE) +
+  geom_point(shape="|", show.legend=FALSE) + 
+  theme_bw() +  
+  #facet_wrap(vars(Comparison),nrow=1,scales='free') +
+  scale_fill_brewer(palette="Dark2") +
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank()) + 
+  theme(strip.text.x = element_text(size = 20),
+        legend.text=element_text(size=20),
+        legend.title=element_text(size=20),
+        legend.position="top",
+        axis.text=element_text(size=20),
+        axis.title = element_text(size=20),
+        plot.title = element_text(size = 20))
+ggsave(p, file=file.path(opt$log_dir,meas,paste('pairwise_cell_agreements_targeted.pdf',sep='')),width = 6, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('pairwise_cell_agreements_targeted.RDS',sep='')))  
+p <- pairwise_cell_agreements %>% 
+  ungroup() %>%
+  mutate(Drug_type = ifelse(Called == 'Targeted','Targeted','Broad')) %>%
+  filter(Drug_type=='Broad') %>%
+  mutate(drug=as.factor(drug)) %>% 
+  mutate(drug=reorder(drug, agreement, mean)) %>%
+  ggplot(aes(x=agreement,y=drug, fill = Comparison),show.legend=FALSE) +
+  geom_density_ridges(alpha = .2, show.legend=FALSE) +
+  geom_point(shape="|", show.legend=FALSE) + 
+  theme_bw() +  
+  #facet_wrap(vars(Comparison),nrow=1,scales='free') +
+  scale_fill_brewer(palette="Dark2") +
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank()) + 
+  theme(strip.text.x = element_text(size = 20),
+        legend.text=element_text(size=20),
+        legend.title=element_text(size=20),
+        legend.position="top",
+        axis.text=element_text(size=20),
+        axis.title = element_text(size=20),
+        plot.title = element_text(size = 20)) + 
+  scale_x_continuous(limits=c(0,1))
+ggsave(p, file=file.path(opt$log_dir,meas,paste('pairwise_cell_agreements_broad.pdf',sep='')),width = 6, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('pairwise_cell_agreements_broad.RDS',sep='')))  
+```
+
+Final agreement barplot.
+```{r}
+p <- pairwise_study_agreements %>% 
+  select(drug, measure, pearson_corr, Drug_type, auc, Intersection, Comparison) %>% 
+  gather(measure, value, pearson_corr, auc) %>%
+  filter((Drug_type!='Targeted' & measure=='pearson_corr') | (Drug_type=='Targeted' & measure=='auc')) %>%
+  mutate(drug = reorder(drug, value)) %>%
+  mutate(value = round(value,2)) %>%
+  ggplot(aes(drug, value, label = value, fill=Comparison)) +   
+  geom_bar(aes(color=Drug_type), stat = "identity", width = 0.5) +
+  geom_text(nudge_y = 0.05,  size = 3) +
+  theme_bw() + 
+  scale_fill_brewer(palette='Blues') +
+  scale_color_brewer(palette='Dark2', guide=FALSE) +
+  coord_flip() + 
+  theme(legend.position = 'top') +
+  labs(fill='') +
+  ylab('Agreement') +
+  xlab('') 
+ggsave(p, file=file.path(opt$log_dir,meas, paste('final_agreements.pdf',sep='')),width = 4, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('final_agreements.RDS',sep='')))  
+
+p <- pairwise_study_agreements %>% 
+  select(drug, measure, auc, Drug_type, Intersection, Comparison) %>% 
+  gather(measure, value, auc) %>%
+  mutate(drug = reorder(drug, value)) %>%
+  mutate(value = round(value,2)) %>%
+  ggplot(aes(drug, value, label = value, fill=Comparison)) +   
+  geom_bar(aes(color=Drug_type), stat = "identity", width = 0.5) +
+  geom_text(nudge_y = 0.05,  size = 3) +
+  theme_bw() + 
+  scale_fill_brewer(palette='Blues') +
+  scale_color_brewer(palette='Dark2', guide=FALSE) +
+  coord_flip() + 
+  theme(legend.position = 'top') +
+  labs(fill='') +
+  ylab('AUC') +
+  xlab('') 
+ggsave(p, file=file.path(opt$log_dir,meas, paste('final_auc_agreements.pdf',sep='')),width = 4, height = 8, units = "in")
+saveRDS(p, file=file.path(opt$log_dir,meas,paste('final_auc_agreements.RDS',sep='')))  
+```
+
+For broadly-active drugs, calculate the difference between the posteriors. 
+```{r, eval=FALSE}
+new_pairwise_cell_agreements <- tibble()
+for (comp in names(intersection.fitted.list)) {
+  combos <- t(combn(sort(unique(intersection.fitted.list[[comp]]$experiment)),2))
+  for (combo in 1:nrow(combos)) {
+    new_pairwise_cell_agreements <- intersection.fitted.list[[comp]] %>%
+      filter(experiment %in% combos[combo,]) %>% 
+      select(drug,cell,experiment, measure, cell_type, value, drug_type, posterior) %>%
+      mutate(posterior = case_when(posterior==1 ~ .99,posterior==0 ~ .01,TRUE ~ posterior)) %>%
+      gather(variable, value, -(drug:measure)) %>% 
+      unite(temp, experiment, variable) %>%
+      distinct(drug, cell, temp, measure, value) %>%
+      spread(temp,value) %>%
+      mutate_at(vars(ends_with('_value')),funs(as.numeric)) %>%
+      mutate_at(vars(ends_with('_posterior')),funs(as.numeric)) %>%
+      group_by(drug, cell, measure) %>%
+      mutate_(g1 = paste(combos[combo,1],'drug_type',sep='_'), g2 = paste(combos[combo,2],'drug_type',sep='_')) %>%
+      mutate(Called=case_when(g1==g2 & g1 == 'broad'~'Broadly-active',
+                                 g1==g2 & g1 == 'targeted'~'Targeted',
+                                 TRUE ~ 'Disagree')) %>% 
+      filter(Called=='Broadly-active') %>%
+      mutate(Diff = eval(parse(text=paste(combos[combo,1],'posterior',sep='_'))) - eval(parse(text=paste(combos[combo,2],'posterior',sep='_')))) %>%
+      group_by(drug, measure) %>%
+      mutate(diff_mean = mean(Diff),
+             diff_sd = sd(Diff)) %>%
+      ungroup() %>%
+      mutate(threshold_high = qnorm(.975, mean=diff_mean, sd=diff_sd)) %>%
+      mutate(threshold_low = qnorm(.025, mean=diff_mean, sd=diff_sd)) %>%
+      mutate(agree = case_when((Diff<=threshold_high) & (Diff>=threshold_low) ~ TRUE,
+                               TRUE ~ FALSE)) %>%
+      mutate(Intersection = comp, Comparison=paste(combos[combo,1],combos[combo,2],sep='_')) %>%
+      select(cell,drug,measure,Called, Intersection, Comparison, agree) %>%
+      bind_rows(new_pairwise_cell_agreements) 
+  }
+}
+```
+
+Hard threshold cell agreements as agree/disagree and calculate proportions per drug.
+```{r, eval=FALSE}
+pairwise_cell_agreements %>% 
+  ungroup() %>%
+  filter(Called == 'Targeted') %>%
+  mutate(agree = agreement>=.975) %>%
+  bind_rows(new_pairwise_cell_agreements) %>%
+  group_by(drug, measure, Comparison, Intersection, Called) %>%
+  summarise(prop_agree = mean(agree)) %>%
+  ungroup()
+```
+
+Load known biomarkers (gene-drug associations).
+```{r, eval=FALSE}
+library(readxl)
+gene_drug_asociations <- read_excel(opt$biomarkers_file, sheet = "mutation") %>%
+  as_tibble() %>%
+  bind_rows(read_excel(opt$biomarkers_file, sheet = "copy_number_variation"),
+            read_excel(opt$biomarkers_file, sheet = "expression")) %>%
+  mutate(type=case_when(type=='expression' ~ 'rna',
+                        type=='copy_number_variation' ~ 'cnv',
+                        TRUE ~ type))
+```
+
+Calculate biomarker effect sizes.
+```{r,eval=FALSE}
+library(PharmacoGx)
+new_sProfiles_all <- posterior_cell_assignments
+rez <- tibble()
+for (dataset in opt$datasets) {
+  #load(file.path('../PSets',paste(dataset,'RData',sep='.')))
+  load(file.path('PSets',paste(dataset,'RData',sep='.')))
+  eval(parse(text = paste('tempPset <- ',dataset,sep='')))
+  for (feat in c('cnv','rna','mutation')) {
+    features <- gene_drug_asociations %>%
+      filter(type==feat) %>%
+      distinct(gene) %>% 
+      pull()
+    drugs <- gene_drug_asociations %>%
+      filter(type==feat) %>%
+      distinct(compound) %>% 
+      pull() 
+    idx <- which(featureInfo(tempPset,feat)$Symbol %in% features)
+    molfeatures <- fNames(tempPset, feat)[idx]
+    genefeatures <- featureInfo(tempPset,feat)$Symbol[idx]
+    if (!is.null(genefeatures)) {
+      concor <- tibble(ID=molfeatures,gene=genefeatures)
+    } else {
+      concor <- tibble(ID=molfeatures,gene=NA)
+    }
+    sProfiles <- summarizeSensitivityProfiles(tempPset, sensitivity.measure = opt$sensitivity_measure, summary.stat = 'median', verbose = FALSE) %>%
+      as.data.frame() %>%
+      rownames_to_column('drug') %>%
+      as_tibble() %>%
+      gather(key='cell',value='value',-drug) %>%
+      group_by(drug) %>%
+      mutate(waterfall=PharmacoGx:::callingWaterfall(value,type='AUC')) %>%
+      ungroup() %>% 
+      rename(!!opt$sensitivity_measure := value)
+    sig.rna <- lapply(c(opt$sensitivity_measure,'waterfall','cell_type'), function(jj) {
+      new_sProfile <- new_sProfiles_all %>%
+        filter(experiment==dataset) %>%
+        select(drug,cell,cell_type) %>%
+        mutate(cell_type = as.factor(cell_type)) %>%
+        right_join(sProfiles, by=c('drug','cell')) %>%
+        select(drug, cell, jj) %>% 
+        spread(key='cell',value=jj) %>%
+        as.data.frame() %>%
+        column_to_rownames('drug')
+      ss <- data.frame()
+      for (molfeat in molfeatures) {
+        tt <- try(drugSensitivitySig(pSet=tempPset,
+                                  mDataType=feat,
+                                  drugs=drugs,
+                                  features=molfeat,
+                                  molecular.summary.stat="median",
+                                  sensitivity.summary.stat="median",
+                                  verbose=TRUE,
+                                  sProfiles=new_sProfile), silent = TRUE)
+        if (!(class(tt) == 'try-error')) {
+          ss <- bind_rows(ss,as.data.frame(tt) %>% 
+                            mutate(ID=molfeat))
+        }
+      }
+      if (nrow(ss) > 0) {
+        ss %>%
+          as_tibble() %>%
+          mutate(method=jj) %>%
+          gather(key='compound',value='value',-c('ID','method')) %>%
+          separate(compound,into=c('compound','statistic'),sep="[.]") %>%
+          left_join(concor, by='ID') %>%
+          select(-ID) %>%
+          mutate(dataset = dataset)
+      } else {
+        ss
+      }
+    })
+    rez <- bind_rows(rez,do.call(rbind,sig.rna))
+  }
+}
+saveRDS(object=rez,file=file.path(opt$log_dir,'biomarker_effect_sizes.RDS'))
+saveRDS(object=gene_drug_asociations,file=file.path(opt$log_dir,'gene_drug_asociations.RDS'))
+```
+
+Clear environment.
+```{r}
+rm(list=ls(all.names = TRUE))
+```
+
