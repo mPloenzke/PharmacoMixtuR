@@ -64,20 +64,21 @@ iterate_em <- function(state, ...) {
   # E-step for cell types (targetted drugs)
   targetted_drug_list <- unique(targetted_drug_fits$drug)
   targetted_cell_assignments <- lapply(targetted_drug_list, function(dr) {
-    state$cell_assignments %>% 
-      filter(drug == dr) %>% 
-      select(drug:measure) %>%
-      mutate(drug_type='targeted') %>%
-      mutate(value=ifelse(value==0,1e-3,value)) %>%
-      crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type) %>% rename(experiment1=experiment)) %>% 
-      filter(experiment==experiment1) %>% 
-      select(-experiment1) %>% 
-      mutate(median = qbeta(.5,alpha,beta),
-             likelihood = dbeta(value, alpha, beta)) %>% 
+      state$cell_assignments %>% 
+        filter(drug == dr) %>% 
+        select(drug:measure) %>%
+        mutate(drug_type='targeted') %>%
+        mutate(value=ifelse(value==0,1e-3,value)) %>%
+        crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type) %>% rename(experiment1=experiment)) %>% 
+        filter(experiment==experiment1) %>% 
+        select(-experiment1) %>% 
+        mutate(median = qbeta(.5,alpha,beta),
+               likelihood = dbeta(value, alpha, beta)) %>% 
       group_by(cell_type) %>%
       mutate(max.likelihood=max(likelihood)) %>%
       ungroup() %>%
-      mutate(likelihood = case_when(value>median & cell_type == 'sensitive' ~ max.likelihood-likelihood + max.likelihood, 
+      mutate(likelihood = case_when(value>median & cell_type == 'sensitive' ~ max.likelihood-likelihood + max.likelihood,
+                                    value<median & cell_type == 'resistant' ~ max.likelihood-likelihood + max.likelihood, 
                                     TRUE~likelihood)) %>%
       mutate(likelihood = targeted_cell_type_prior * likelihood) %>%
       group_by(drug, cell, cell_type) %>%
