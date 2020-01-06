@@ -35,6 +35,20 @@ iterate_em <- function(state, ...) {
     group_by(drug, experiment) %>%
     mutate(ndist=n_distinct(cell_type)) %>%
     ungroup()
+  mdat_temp <- state$cell_assignments %>% 
+    select(drug, experiment, cell_type, targeted_cell_type_prior) %>% 
+    distinct() %>%
+    group_by(drug, experiment) %>%
+    mutate(ndist=n_distinct(cell_type)) %>%
+    ungroup()
+  mdat_temp <- mdat_temp %>%
+    filter(ndist<2) %>%
+    mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
+           cell_type=cell_type2,
+           targeted_cell_type_prior = 1-targeted_cell_type_prior) %>%
+    select(-cell_type2) %>%
+    bind_rows(mdat_temp) %>%
+    select(-ndist)
   targetted_drug_fits <- targetted_drug_fits_temp %>%
     bind_rows(
       targetted_drug_fits_temp %>% 
@@ -42,14 +56,14 @@ iterate_em <- function(state, ...) {
         mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
                cell_type=cell_type2,
                number=0,
-               alpha=case_when(cell_type == 'resistant' ~ 1,
-                               cell_type == 'sensitive' ~ 1),
-               beta=case_when(cell_type == 'resistant' ~ 1,
-                              cell_type == 'sensitive' ~ 1)) %>%
+               alpha=case_when(cell_type == 'resistant' ~ .5,
+                               cell_type == 'sensitive' ~ 7.5),
+               beta=case_when(cell_type == 'resistant' ~ 2.5,
+                              cell_type == 'sensitive' ~ 5)) %>%
         select(-cell_type2)
     ) %>%
     select(-ndist, -number) %>%
-    left_join(state$cell_assignments %>% select(drug, experiment, cell_type, targeted_cell_type_prior) %>% distinct(), by=c('drug','experiment','cell_type'))
+    left_join(mdat_temp, by=c('drug','experiment','cell_type'))
   
   # M-step for drug-specific parameters (broad)
   broad_drug_fits <- state$cell_assignments %>%
