@@ -24,7 +24,7 @@ Set options for the run.
 min_posterior_probability_sensitive <- .5
 use_all_features <- TRUE
 downsample_features <- TRUE
-comparison <- 'CCLE_GDSC'
+comparison <- 'CCLE_GDSC1000_gCSI_CTRPv2_FIMM'
 feature.types <- c("rna") # mutation fusion cnv rna rna2 rnaseq
 run_on_cluster <- TRUE
 impute_with_mean <- TRUE # if a feature exists for some cells but not others, replace the missings with the mean
@@ -228,7 +228,9 @@ for (dataset in datasets) {
                select(-Model_fit) %>%
                distinct(),by=c('cell','experiment','drug')) %>% 
   mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
-                               TRUE ~ 'resistant'))
+                               TRUE ~ 'resistant')) #%>%
+  #mutate(cell_type = case_when(posterior_probability_sensitive >= .99 ~ 'sensitive',
+#                               posterior_probability_sensitive <= .01 ~ 'resistant')) 
   }
   eval(parse(text=paste('rm(',dataset,',tempPset, x_new, joined, y_new_temp)',sep='')))
 }
@@ -331,7 +333,9 @@ for (drug_for_biomarkers in all_drugs) {
     distinct() %>%
     mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
     mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
-                               TRUE ~ 'resistant')) %>%
+                               TRUE ~ 'resistant'))# %>%
+    #mutate(cell_type = case_when(posterior_probability_sensitive >= .99 ~ 'sensitive',
+    #                           posterior_probability_sensitive <= .01 ~ 'resistant'))
     group_by(cell) %>%
     mutate(rownum = row_number()) %>%
     mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%

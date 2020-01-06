@@ -18,11 +18,12 @@ library(cowplot)
 
 Combine posterior agreement plot with individual densities.
 ```{r}
-base_path <- file.path('~/Desktop/Concordance/tidyPharmaco/CCLE_GDSC_fit_p60_old/auc_recomputed')
+base_path <- file.path('~/Desktop/Concordance/results/CCLE_GDSC_fit_p60/auc_recomputed')
 drugs <- c('17AAG','AZD0530','AZD6244','Crizotinib','Erlotinib','lapatinib','Nilotinib','Nutlin3','paclitaxel',
            'PD0325901','PD0332991','PHA665752','PLX4720','Sorafenib','TAE684')
 for (drug in drugs) {
   p_main <- readRDS(file.path(base_path,'CCLE_GDSC','by_drug',paste(drug,'_posterior_CCLE_GDSC.RDS',sep=''))) + 
+    scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) + 
     theme(legend.position = c(.1,.65), 
           plot.title=element_blank()) + 
     theme(axis.title = element_text(size = 14),

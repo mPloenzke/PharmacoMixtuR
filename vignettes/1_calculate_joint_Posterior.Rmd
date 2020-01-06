@@ -21,7 +21,7 @@ Set up and load packages.
 Set options.
 ```{r}
   opt <- list()
-  opt$datasets <- c("FIMM") # CCLE GDSC GDSC1000 gCSI FIMM CTRPv2
+  opt$datasets <- c("CCLE", "GDSC1000", "CTRPv2", "gCSI","FIMM") # CCLE GDSC GDSC1000 gCSI FIMM CTRPv2
   opt$biomarkers_file <- '~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx'
   #opt$biomarkers_file <- '~/concordance/PSets/gene_drug_asociations.xlsx'
   opt$min_intersection <- 1 # Minimum number of studies a drug/cell must be assayed in to be included in the intersection comparison
@@ -31,7 +31,7 @@ Set options.
   # Prior specifications denoting cell sensitivity and proportion of drugs broadly-active:
   opt$prior.sensitive <- .6 #.3 # prior specification denoting cell is sensitive if greater than this value
   opt$prior.broadly.active <- 'median_mad' #median.05 # prior specification denoting drug is broadly-active if probability cell is sensitive is greater than value
-  opt$run_on_cluster <- FALSE # this just changes file paths depending on where the code is being run
+  opt$run_on_cluster <- TRUE # this just changes file paths depending on where the code is being run
 ```
 
 Set up log directory.
@@ -105,7 +105,7 @@ cells.tibble.list <- lapply(1:length(intersection.tibble.list), function(li) {
     left_join(drugs.tibble.list[[li]], by=c('drug','measure')) %>% 
     select(drug:measure,drug_type) %>%
     mutate(thresho = case_when(drug_type == 'broad' ~ .5, TRUE ~ .95)) %>%
-    group_by(drug) %>%
+    group_by(drug, experiment) %>%
     mutate(cell_type = ifelse(value>=quantile(value,probs = thresho),'sensitive','resistant')) %>%
     ungroup() %>% 
     select(-thresho)
@@ -324,10 +324,10 @@ targetted_drug_fits_list <- lapply(cells.tibble.list, function(tibb) {
         mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
                cell_type=cell_type2,
                number=0,
-               alpha=case_when(cell_type == 'resistant' ~ 1,
-                               cell_type == 'sensitive' ~ 1),
-               beta=case_when(cell_type == 'resistant' ~ 1,
-                              cell_type == 'sensitive' ~ 1)) %>%
+               alpha=case_when(cell_type == 'resistant' ~ .5,
+                               cell_type == 'sensitive' ~ 7.5),
+               beta=case_when(cell_type == 'resistant' ~ 2.5,
+                              cell_type == 'sensitive' ~ 5)) %>%
         select(-cell_type2)
     ) %>%
     group_by(drug, experiment) %>%       
@@ -366,6 +366,7 @@ targetted_cell_assignments_list <- lapply(1:length(targetted_drug_fits_list), fu
       mutate(max.likelihood=max(likelihood)) %>%
       ungroup() %>%
       mutate(likelihood = case_when(value>median & cell_type == 'sensitive' ~ max.likelihood-likelihood + max.likelihood, 
+                                    value<median & cell_type == 'resistant' ~ max.likelihood-likelihood + max.likelihood, 
                                     TRUE~likelihood)) %>%
       mutate(likelihood = targeted_cell_type_prior * likelihood) %>%
       group_by(drug, cell, experiment) %>%
@@ -438,7 +439,7 @@ Run EM.
   for(num in 1:length(cell_assignments_list)) {
     drug_assignments <- drug_assignments_list[[num]]
     cell_assignments <- cell_assignments_list[[num]]
-    iterations_list[[num]] <- accumulate(1:3, iterate_em, .init = list(drug_assignments = drug_assignments,
+    iterations_list[[num]] <- accumulate(1:10, iterate_em, .init = list(drug_assignments = drug_assignments,
                                                                        cell_assignments = cell_assignments))
   }
   names(iterations_list) <- names(intersection.tibble.list)
