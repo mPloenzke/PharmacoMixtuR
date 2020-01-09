@@ -20,12 +20,6 @@
 #' @importFrom stats qbeta
 iterate_em <- function(state, ...) {
 
-  # M-step for drug-type parameters
-  drug_types <- state$drug_assignments %>%
-    group_by(drug_type) %>%
-    do(mutate(fit_bb_mle(.$sensitive, .$cell_count), number = nrow(.))) %>%
-    ungroup() 
-  
   # M-step for drug-specific parameters (targetted)
   targetted_drug_fits_temp <- state$cell_assignments %>% 
     mutate(value = case_when(value==0 ~  1e-3, TRUE ~ value)) %>%
@@ -57,9 +51,9 @@ iterate_em <- function(state, ...) {
                cell_type=cell_type2,
                number=0,
                alpha=case_when(cell_type == 'resistant' ~ .5,
-                               cell_type == 'sensitive' ~ 7.5),
-               beta=case_when(cell_type == 'resistant' ~ 2.5,
-                              cell_type == 'sensitive' ~ 5)) %>%
+                               cell_type == 'sensitive' ~ 50),
+               beta=case_when(cell_type == 'resistant' ~ 7.5,
+                              cell_type == 'sensitive' ~ 50)) %>%
         select(-cell_type2)
     ) %>%
     select(-ndist, -number) %>%
@@ -78,16 +72,16 @@ iterate_em <- function(state, ...) {
   # E-step for cell types (targetted drugs)
   targetted_drug_list <- unique(targetted_drug_fits$drug)
   targetted_cell_assignments <- lapply(targetted_drug_list, function(dr) {
-      state$cell_assignments %>% 
-        filter(drug == dr) %>% 
-        select(drug:measure) %>%
-        mutate(drug_type='targeted') %>%
-        mutate(value=ifelse(value==0,1e-3,value)) %>%
-        crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type) %>% rename(experiment1=experiment)) %>% 
-        filter(experiment==experiment1) %>% 
-        select(-experiment1) %>% 
-        mutate(median = qbeta(.5,alpha,beta),
-               likelihood = dbeta(value, alpha, beta)) %>% 
+    state$cell_assignments %>% 
+      filter(drug == dr) %>% 
+      select(drug:measure) %>%
+      mutate(drug_type='targeted') %>%
+      mutate(value=ifelse(value==0,1e-3,value)) %>%
+      crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type) %>% rename(experiment1=experiment)) %>% 
+      filter(experiment==experiment1) %>% 
+      select(-experiment1) %>% 
+      mutate(median = qbeta(.5,alpha,beta),
+             likelihood = dbeta(value, alpha, beta)) %>% 
       group_by(cell_type) %>%
       mutate(max.likelihood=max(likelihood)) %>%
       ungroup() %>%
@@ -99,8 +93,7 @@ iterate_em <- function(state, ...) {
       mutate(likelihood = sum(likelihood)) %>%
       ungroup() %>%
       group_by(drug, cell, experiment) %>%
-      #mutate(posterior=likelihood/sum(likelihood)) %>%
-      mutate(posterior=exp(log(likelihood)-log(sum(likelihood)))) %>% 
+      mutate(posterior=likelihood/sum(likelihood)) %>%
       top_n(1, likelihood) %>% 
       ungroup()
   })
@@ -115,22 +108,49 @@ iterate_em <- function(state, ...) {
     mutate(value=ifelse(value==0,1e-3,value)) %>%
     left_join(broad_drug_fits, by=c('drug','drug_type','experiment')) %>%
     mutate(likelihood = 1 * dbeta(value, alpha, beta),
-           cell_type = ifelse(value>=qbeta(.5,.$alpha,.$beta),'sensitive','resistant'),
-           posterior = pbeta(.$value,.$alpha,.$beta,lower.tail = FALSE))
+           cell_type = ifelse((broad_cell_type_prior*pbeta(value, alpha, beta)) >
+                                            ((1-broad_cell_type_prior)*(1-pbeta(value, alpha, beta))),
+                                          'sensitive','resistant'),
+           posterior = (broad_cell_type_prior*pbeta(value, alpha, beta)) +
+             ((1-broad_cell_type_prior)*(1-pbeta(value, alpha, beta))), 
+           posterior = 1-posterior)
+  
+  # Format all cell assignments
+  cell_assignments <- bind_rows(targetted_cell_assignments,broad_cell_assignments) %>%
+    group_by(drug, cell_type, experiment) %>%
+    fill(targeted_cell_type_prior, .direction='down') %>%
+    ungroup() %>%
+    group_by(drug, experiment) %>% 
+    fill(broad_cell_type_prior, .direction='up') %>%
+    ungroup() %>% 
+    right_join(state$drug_assignments %>% select(drug, drug_type), by=c('drug','drug_type')) %>%
+    select(drug, cell, value, experiment, measure, drug_type, cell_type, broad_cell_type_prior, targeted_cell_type_prior, posterior, likelihood)
+  
+  # M-step for drug-type parameters
+  drug_types <- cell_assignments %>%
+    group_by(drug, measure, drug_type) %>%
+    summarize(sensitive = sum(cell_type=='sensitive'),
+              cell_count = n()) %>%
+    group_by(drug_type) %>%
+    ungroup() %>% 
+    group_by(drug_type) %>%
+    do(mutate(fit_bb_mle(.$sensitive, .$cell_count), number = nrow(.))) %>%
+    ungroup() %>%
+    left_join(state$drug_assignments %>% distinct(drug_type, drug_type_prior), by='drug_type')
   
   # E-step for drug types
   targetteds <- state$drug_assignments %>%
-    select(drug, measure, p_prior) %>%
+    select(drug, measure) %>%
     right_join(targetted_cell_assignments %>% select(drug, cell, cell_type), by='drug') %>% 
-    group_by(drug, measure, p_prior) %>%
+    group_by(drug, measure) %>%
     summarise(sensitive = sum(cell_type=='sensitive'),
               cell_count = n()) %>%
     ungroup() %>% 
     mutate(type='targeted')
   broads <- state$drug_assignments %>%
-    select(drug, measure, p_prior) %>%
+    select(drug, measure) %>%
     right_join(broad_cell_assignments %>% select(drug, cell, cell_type), by='drug') %>% 
-    group_by(drug, measure, p_prior) %>%
+    group_by(drug, measure) %>%
     summarise(sensitive = sum(cell_type=='sensitive'),
               cell_count = n()) %>%
     ungroup() %>%
@@ -139,22 +159,12 @@ iterate_em <- function(state, ...) {
   drug_assignments <- drugs.tibble %>% 
     rename(drug_type = type) %>%
     right_join(drug_types %>% select(-number), by='drug_type') %>%
-    mutate(drug_type_prior = case_when (drug_type == 'broad' ~ p_prior, TRUE ~ 1-p_prior)) %>%
-    mutate(likelihood = drug_type_prior * VGAM::dbetabinom.ab(sensitive, cell_count, alpha, beta)) %>%
-    group_by(drug) %>%
-    mutate(posterior=likelihood/sum(likelihood)) %>% 
+    mutate(likelihood = drug_type_prior*VGAM::dbetabinom.ab(sensitive, cell_count, alpha, beta)) %>%
+    group_by(drug) %>% 
+    mutate(posterior=likelihood/sum(likelihood)) %>%
     top_n(1, likelihood) %>%
     ungroup()
-  
-  cell_assignments <- bind_rows(targetted_cell_assignments,broad_cell_assignments) %>%
-    group_by(drug, cell_type) %>%
-    fill(targeted_cell_type_prior, .direction='down') %>%
-    ungroup() %>%
-    group_by(drug) %>% 
-    fill(broad_cell_type_prior, .direction='up') %>%
-    ungroup() %>% 
-    right_join(drug_assignments %>% select(drug, drug_type), by=c('drug','drug_type')) %>% 
-    select(drug, cell, value, experiment, measure, drug_type, cell_type, broad_cell_type_prior, targeted_cell_type_prior, posterior, likelihood)
+  #if (drug_assignments %>% filter(drug=='Crizotinib') %>% distinct(drug_type) %>% pull() == 'broad') {browser()}
   
   drug_fits <- targetted_drug_fits %>%
     select(drug, drug_type, cell_type, experiment, alpha, beta) %>%
