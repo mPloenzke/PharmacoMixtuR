@@ -30,7 +30,8 @@ Set options.
   opt$sensitivity_measure <- c('auc_recomputed') # raw_auc e_inf hill_slope ec50 auc_recomputed
   opt$use_small_datasets <- FALSE
   # Prior specifications denoting cell sensitivity and proportion of drugs broadly-active:
-  opt$prior.sensitive <- .6 #.3 # prior specification denoting cell is sensitive if greater than this value
+  opt$drug.type.prior <- .6 # quantile of cell sensitivity denoting drug is targeted if greater than this value
+  opt$cell.type.prior <- .9 # quantile of cell sensitivity denoting cell is sensitive if greater than this value
   opt$prior.broadly.active <- 'median_mad' #median.05 # prior specification denoting drug is broadly-active if probability cell is sensitive is greater than value
   opt$run_on_cluster <- TRUE # this just changes file paths depending on where the code is being run
 ```
@@ -80,7 +81,7 @@ Initialize drug and cell assignments for EM using prior specifications for proba
 ```{r}
 drugs.tibble.list <- lapply(intersection.tibble.list, function(li) {
   drug_dat <- li %>% 
-    mutate(all_median = quantile(value,opt$prior.sensitive),
+    mutate(all_median = quantile(value,opt$drug.type.prior),
            all_mad = stats::mad(value),
            drug=as.factor(drug)) %>% 
     group_by(drug) %>% 
@@ -108,7 +109,7 @@ cells.tibble.list <- lapply(1:length(intersection.tibble.list), function(li) {
     select(drug:measure,drug_type) %>%
     ungroup() %>% 
     group_by(experiment) %>%
-    mutate(prior_threshold = quantile(value,probs = opt$prior.sensitive), 
+    mutate(prior_threshold = quantile(value,probs = opt$cell.type.prior), 
            cell_type = ifelse(value>=prior_threshold,'sensitive','resistant')) %>%
     ungroup()
 })
@@ -580,7 +581,6 @@ posterior <- readRDS(file.path(opt$log_dir,'posterior.formatted.RDS'))
 expit <- function(x) {
   return(1/(1+exp(-x)))
 }
-dr <- '681640'
 for (dr in unique(posterior$drug)) {
   tdat <- posterior %>%
     filter(drug==dr) %>%
@@ -591,7 +591,7 @@ for (dr in unique(posterior$drug)) {
   ylabb <- ifelse(tdat %>% summarise(n_distinct(cell_type)) %>% pull == 2,'Probability(cell is sensitive)','Cell sensitivity CDF')
   p <- tdat %>%
     ggplot(aes(x=realized_value,y=posterior_probability_sensitive)) + 
-    geom_point(aes(color=as.factor(num_experiments),shape=cell_type),size=3,alpha=.6) + 
+    geom_point(aes(color=as.factor(num_experiments)),size=3,alpha=.6) + 
     geom_hline(aes(yintercept=.5),lty=2) +
     geom_vline(aes(xintercept=.2),lty=2,alpha=.5,color='red') + 
     geom_smooth(data=subset(tdat, num_experiments==1), method = "nls", 
@@ -602,9 +602,10 @@ for (dr in unique(posterior$drug)) {
     theme(legend.position='bottom') + 
     ylab(ylabb) + 
     xlab('Observed Area-above-the-curve') + 
-    guides(color=guide_legend(title="Number experiments"),
-           shape=guide_legend(title="Cell type"))
-  ggsave(p,file=file.path(opt$log_dir,'posterior_sensitivity_comparisons',paste(dr_short,'.pdf',sep='')),width=8,height=5,units='in')
+    guides(color=guide_legend(title="Number experiments")) + 
+    labs(title='Posterior cell sensitivity') + 
+    scale_x_continuous(limits = c(0,1),breaks = c(0,.5,1))
+  ggsave(p,file=file.path(opt$log_dir,'posterior_sensitivity_comparisons',paste(dr_short,'.pdf',sep='')),width=8,height=5,units='in')f
   saveRDS(p, file.path(opt$log_dir,'posterior_sensitivity_comparisons',paste(dr_short,'.RDS',sep='')))
   while(dev.cur()!=1) {dev.off()}
 }

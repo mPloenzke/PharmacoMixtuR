@@ -21,13 +21,17 @@ library(PharmacoGx)
 
 Set options for the run.
 ```{r}
-min_posterior_probability_sensitive <- .5
-use_all_features <- TRUE
-downsample_features <- TRUE
-comparison <- 'CCLE_GDSC1000_gCSI_CTRPv2_FIMM'
+comparison <- "CCLE_GDSC1000_CTRPv2_FIMM_gCSI"
+#comparison <- 'CCLE_GDSC'
+min_posterior_probability_sensitive <- .5 # minimum posterior probability for denoting a cell is sensitive
+use_all_features <- TRUE # use all available features (TRUE) or restrict to features with a previously-documented association (FALSE)
+downsample_features <- TRUE # downsample to 5K most variable features (TRUE, recommended)
 feature.types <- c("rna") # mutation fusion cnv rna rna2 rnaseq
-run_on_cluster <- TRUE
+run_on_cluster <- TRUE # run on cluster (TRUE) or run locally (FALSE)
 impute_with_mean <- TRUE # if a feature exists for some cells but not others, replace the missings with the mean
+mean_common_cells <- FALSE # reduce joint dataset to mean sensitivity measure 
+individual_study_measures <- c('auc_recomputed','naive')
+joint_study_measures <- c('naive','auc_recomputed','posterior_probability_sensitive','cell_type')
 base_log_dir <- paste(comparison,'pathway',feature.types[1],sep='_')
 dir.create(base_log_dir,showWarnings = FALSE)
 ```
@@ -91,7 +95,10 @@ gene_drug_asociations <- gene_drug_asociations %>% filter(drug %in% all_drugs)
 
 Load gene names.
 ```{r}
-ensembl = biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+ensembl <- try(biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl"), silent=TRUE)
+if (class(ensembl) == 'try-error') {
+  ensembl = biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl",mirror='uswest')
+}
 chr_genes <- biomaRt::getBM(attributes=c('ensembl_gene_id','ensembl_transcript_id',
                                          'hgnc_symbol','entrezgene_id'), mart = ensembl) %>%
   as_tibble() %>% 
@@ -216,8 +223,16 @@ for (dataset in datasets) {
     }
   }
   if (any.features.exist) {
-    rez[[dataset]] <- joined %>% inner_join(y_new_temp, by='cell')
+    rez[[dataset]] <- joined %>% inner_join(y_new_temp, by='cell') 
+  } else {
+    rez[[dataset]] <- y_new_temp
   }
+  rez[[dataset]] <- rez[[dataset]] %>%
+      inner_join(posterior %>% 
+             select(-Model_fit) %>%
+             distinct(),by=c('cell','experiment','drug')) %>% 
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                             TRUE ~ 'resistant')) 
   eval(parse(text=paste('rm(',dataset,',tempPset, x_new, joined, y_new_temp)',sep='')))
 }
 ```
@@ -227,24 +242,24 @@ Pathway analysis for varying outcome variables.
 for (drug_for_biomarkers in all_drugs) {
   log_dir <- file.path(base_log_dir,drug_for_biomarkers)
   dir.create(log_dir,showWarnings = FALSE)
-  #if (drug_for_biomarkers == 'Vorinostat') { browser()}
   for (study in names(rez)) {
     rez[[study]] <- rez[[study]][!(colSums(is.na(rez[[study]])) == nrow(rez[[study]]))]
     ourData <- rez[[study]] %>%
       na.omit() %>%
-      filter(drug==drug_for_biomarkers)
-    for (depVar in c('auc_recomputed')) {
+      filter(drug==drug_for_biomarkers) %>%
+      mutate(naive = case_when(auc_recomputed >= .2 ~ 'sensitive',TRUE ~ 'resistant')) 
+    if (nrow(ourData)==0) {next()}
+    for (depVar in individual_study_measures) {
       if (depVar == 'waterfall') { 
         ourData <- ourData %>% filter(waterfall!='intermediate')
       }
-      
       # gather expression data
       expr_data <- ourData %>% 
-        select(-drug, -cell, -experiment, #-waterfall, 
-               -auc_recomputed) %>% #, -cell_type, 
-               #-posterior_probability_sensitive) %>%
+        select(-drug, -cell, -experiment,
+               -auc_recomputed, -naive) %>% 
         mutate_all(as.numeric) %>%
         t() 
+      if (nrow(expr_data) == 0) {next()}
       expr_data <- expr_data[!duplicated(rownames(expr_data)),]
       colnames(expr_data) <- pull(ourData %>% select(cell))
       
@@ -280,17 +295,18 @@ for (drug_for_biomarkers in all_drugs) {
       if (class(my_design) != 'try-error') {
         fit <- try(limma::lmFit(object=eset, design=my_design),silent=TRUE)
         if (class(fit) != 'try-error') {
-          fit <- limma::eBayes(fit)
+          fit <- try(limma::eBayes(fit), silent=TRUE)
+          if (class(fit) != 'try-error') {
+            #g_ontology <- limma::goana(fit,geneid='entrezgene_id')
+            kegg_pathways <- limma::kegga(fit,geneid='entrezgene_id')
         
-          g_ontology <- limma::goana(fit,geneid='entrezgene_id')
-          kegg_pathways <- limma::kegga(fit,geneid='entrezgene_id')
-      
-          write_csv(g_ontology,
-                    path=file.path(log_dir, paste('GO_',depVar,'_',study,'.csv',sep='')), 
-                    col_names = TRUE, append = FALSE)
-          write_csv(kegg_pathways, 
-                    path=file.path(log_dir, paste('KEGG_',depVar,'_',study,'.csv',sep='')), 
-                    col_names = TRUE, append = FALSE)
+            #write_csv(g_ontology,
+            #          path=file.path(log_dir, paste('GO_',depVar,'_',study,'.csv',sep='')), 
+            #          col_names = TRUE, append = FALSE)
+            write_csv(kegg_pathways, 
+                      path=file.path(log_dir, paste('KEGG_',depVar,'_',study,'.csv',sep='')), 
+                      col_names = TRUE, append = FALSE)
+          }
         }
       }
     }
@@ -300,37 +316,79 @@ for (drug_for_biomarkers in all_drugs) {
 
 Pathway analysis for joint.
 ```{r}
-for (dr in all_drugs) {
-  log_dir <- file.path(base_log_dir,dr)
+for (drug_for_biomarkers in all_drugs) {
+  log_dir <- file.path(base_log_dir,drug_for_biomarkers)
   dir.create(log_dir,showWarnings = FALSE)
-  ourData <- do.call(bind_rows, rez) %>% 
-    ungroup() %>%
-    select(-experiment) %>%
-    filter(drug==dr) %>%
-    group_by(cell, drug) %>%
-    mutate_at(vars(-group_cols()), as.numeric) %>%
-    summarise_all(mean, na.rm = TRUE) %>%
-    ungroup() %>%
-    inner_join(posterior %>% 
-                 filter(Model_fit == 'joint',drug==dr) %>%
-                 select(-Model_fit, -experiment) %>%
-                 distinct(), by=c('cell','drug')) %>%
-    distinct() %>%
-    group_by(cell) %>%
-    mutate(rownum = row_number()) %>%
-    mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
-    ungroup() %>%
-    unite(cell, cell,rownum,sep='') %>%
-    mutate(cell_type = case_when(posterior_probability_sensitive >= min_posterior_probability_sensitive ~ 'sensitive',
-                               TRUE ~ 'resistant')) %>%
-    mutate(cell_type = case_when(posterior_probability_sensitive >= .99 ~ 'sensitive',
-                               posterior_probability_sensitive <= .01 ~ 'resistant'))
-  for (depVar in c('auc_recomputed','posterior_probability_sensitive', 'cell_type')) {
+  print(drug_for_biomarkers)
+  naive_cutoff <- .2
+  if (mean_common_cells) {
+    experi_data <- posterior %>% 
+      distinct(cell, experiment) %>% 
+      mutate(experiment2=experiment) %>%
+      spread(experiment,experiment2) %>%
+      replace(is.na(.), '') %>% 
+      group_by(cell) %>%
+      mutate_at(vars(-group_cols()), funs(paste(.,'_', sep=''))) %>%
+      ungroup() %>%
+      mutate_all(funs(case_when(.=='_' ~ '', TRUE~.))) %>%
+      unite(experiment, CCLE, CTRPv2, FIMM, gCSI, GDSC1000, sep='') %>%
+      mutate(experiment = substr(experiment, 1, nchar(experiment)-1))
+    ourData <- do.call(bind_rows, rez) %>% 
+      ungroup() %>%
+      select(-experiment, -cell_type, -posterior_probability_sensitive) %>%
+      filter(drug==drug_for_biomarkers) %>%
+      group_by(cell, drug) %>%
+      mutate_at(vars(-group_cols()), as.numeric) %>%
+      summarise_all(mean, na.rm = TRUE) %>%
+      ungroup() %>%
+      na.omit() %>%
+      inner_join(posterior %>% 
+                   filter(Model_fit == 'joint',drug==drug_for_biomarkers) %>%
+                   select(-Model_fit, -experiment) %>%
+                   distinct(), by=c('cell','drug')) %>%
+      distinct() %>%
+      mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                                 TRUE ~ 'resistant')) %>%
+      group_by(cell) %>%
+      mutate(rownum = row_number()) %>%
+      mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
+      ungroup() %>%
+      unite(cell, cell,rownum,sep='')  %>%
+      left_join(experi_data, by='cell')
+  } else {
+    ourData <- do.call(bind_rows, rez) %>% 
+      ungroup() %>%
+      select(-experiment, -cell_type, -posterior_probability_sensitive, -auc_recomputed) %>%
+      filter(drug==drug_for_biomarkers) %>%
+      group_by(cell, drug) %>%
+      mutate_at(vars(-group_cols()), as.numeric) %>%
+      summarise_all(mean, na.rm = TRUE) %>%
+      ungroup() %>%
+      right_join(do.call(bind_rows, rez) %>% 
+                   select(cell, drug, experiment, auc_recomputed) %>%
+                   filter(drug==drug_for_biomarkers), by=c('cell','drug')) %>%
+      na.omit() %>%
+      inner_join(posterior %>% 
+                   filter(Model_fit == 'joint',drug==drug_for_biomarkers) %>%
+                   select(-Model_fit) %>%
+                   distinct(), by=c('cell','drug', 'experiment')) %>%
+      distinct() %>%
+      mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                                 TRUE ~ 'resistant')) %>%
+      group_by(cell) %>%
+      mutate(rownum = row_number()) %>%
+      mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
+      ungroup() %>%
+      unite(cell, cell,rownum,sep='') 
+  }
+  for (depVar in joint_study_measures) {
     # gather expression data
     expr_data <- ourData %>% 
-      select(-drug, -cell, 
+      select(-drug, -cell, -experiment,
              -auc_recomputed,
-             -posterior_probability_sensitive, -cell_type) %>% 
+             -posterior_probability_sensitive, -cell_type, -naive) %>% 
       mutate_all(as.numeric) %>%
       t() 
     expr_data <- expr_data[!duplicated(rownames(expr_data)),]
@@ -347,6 +405,7 @@ for (dr in all_drugs) {
       mutate(symbol = ifelse(is.na(hgnc_symbol),Feature, hgnc_symbol)) %>%
       mutate(type = ifelse(is.na(extra2),extra1, extra2)) %>%
       select(Full_Feature, symbol, Feature, type, entrezgene_id) %>%
+      distinct(Full_Feature, .keep_all=TRUE) %>%
       column_to_rownames('Full_Feature') %>%
       Biobase::AnnotatedDataFrame()
     
@@ -364,8 +423,11 @@ for (dr in all_drugs) {
     tmp <- ourData %>% 
       select(cell, depVar) %>% 
       rename(Sensitivity= depVar) %>%
+      distinct(cell, .keep_all=TRUE) %>%
       column_to_rownames('cell')
-  
+    if (depVar %in% c('naive','cell_type')) {
+      tmp$Sensitivity <- as.factor(as.character(tmp$Sensitivity))
+    }
     pdata <- Biobase::AnnotatedDataFrame(tmp)
 
     # create expression set
@@ -376,17 +438,18 @@ for (dr in all_drugs) {
     if (class(my_design) != 'try-error') {
       fit <- try(limma::lmFit(object=eset, design=my_design),silent=TRUE)
       if (class(fit) != 'try-error') {
-        fit <- limma::eBayes(fit)
-        
-        g_ontology <- limma::goana(fit,geneid='entrezgene_id')
-        kegg_pathways <- limma::kegga(fit,geneid='entrezgene_id')
-        
-        write_csv(g_ontology,
-                  path=file.path(log_dir, paste('GO_',depVar,'.csv',sep='')), 
-                  col_names = TRUE, append = FALSE)
-        write_csv(kegg_pathways, 
-                  path=file.path(log_dir, paste('KEGG_',depVar,'.csv',sep='')), 
-                  col_names = TRUE, append = FALSE)
+        fit <- try(limma::eBayes(fit), silent=TRUE)
+        if (class(fit) != 'try-error') {
+          #g_ontology <- limma::goana(fit,geneid='entrezgene_id')
+          kegg_pathways <- limma::kegga(fit,geneid='entrezgene_id')
+          
+          #write_csv(g_ontology,
+          #          path=file.path(log_dir, paste('GO_',depVar,'.csv',sep='')), 
+          #          col_names = TRUE, append = FALSE)
+          write_csv(kegg_pathways, 
+                    path=file.path(log_dir, paste('KEGG_',depVar,'.csv',sep='')), 
+                    col_names = TRUE, append = FALSE)
+        }
       }
     }
   }

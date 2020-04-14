@@ -111,10 +111,10 @@ fit_beta_mle <- function(x) {
   } else {
     x2 <- x
   }
-  m <- try(stats4::mle(ll, start = list(alpha = 3, beta = 10), method = "L-BFGS-B",
+  m <- try(stats4::mle(ll, start = list(alpha = 1, beta = 1), method = "L-BFGS-B",
                    lower = c(0.001, .001)),silent=TRUE)
   if (class(m) == "try-error") {
-    ab <- c(1e-2,1e-2)
+    ab <- c(1,5)
   } else {
     ab <- stats4::coef(m)
   }

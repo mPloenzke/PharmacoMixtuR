@@ -21,13 +21,18 @@ library(PharmacoGx)
 
 Set options for the run.
 ```{r}
-min_posterior_probability_sensitive <- .5
-use_all_features <- TRUE
-downsample_features <- TRUE
-comparison <- 'CCLE_GDSC1000_gCSI_CTRPv2_FIMM'
+# <- "CCLE_GDSC1000_CTRPv2_FIMM_gCSI"
+comparison <- 'CCLE_GDSC'
+min_posterior_probability_sensitive <- .5 # minimum posterior probability for denoting a cell is sensitive
+use_all_features <- TRUE # use all available features (TRUE) or restrict to features with a previously-documented association (FALSE)
+downsample_features <- TRUE # downsample to 5K most variable features (TRUE, recommended)
 feature.types <- c("rna") # mutation fusion cnv rna rna2 rnaseq
-run_on_cluster <- TRUE
+run_on_cluster <- TRUE # run on cluster (TRUE) or run locally (FALSE)
 impute_with_mean <- TRUE # if a feature exists for some cells but not others, replace the missings with the mean
+mean_common_cells <- TRUE # reduce joint dataset to mean sensitivity measure 
+include_individual_posteriors <- TRUE # for individual study comparisons, should the posterior fit via only that dataset be included (TRUE) or should it be compared to the joint fit posterior (FALSE)z
+individual_study_measures <- c('waterfall','naive','auc_recomputed','posterior_probability_sensitive','cell_type')
+joint_study_measures <- c('naive','auc_recomputed','posterior_probability_sensitive','cell_type')
 base_log_dir <- paste(comparison,'biomarkers',feature.types[1],sep='_')
 dir.create(base_log_dir,showWarnings = FALSE)
 ```
@@ -35,9 +40,11 @@ dir.create(base_log_dir,showWarnings = FALSE)
 Load posteriors.
 ```{r}
 if (!run_on_cluster) {
-  #individual_posteriors <- readRDS(file.path('~/Desktop/Concordance/tidyPharmaco',
-  #                                           paste(comparison,'_fit_p60',sep=''),
-  #                                           'posterior.formatted.RDS'))
+  if (include_individual_posteriors) {
+    individual_posteriors <- readRDS(file.path('~/Desktop/Concordance/tidyPharmaco',
+                                               paste(comparison,'_fit_p60',sep=''),
+                                               'posterior.formatted.RDS'))
+  }
   joint_posteriors <- readRDS(file.path('~/Desktop/Concordance/tidyPharmaco',
                                         paste(comparison,'_fit_joint',sep=''),
                                         'posterior.formatted.RDS')) 
@@ -46,9 +53,11 @@ if (!run_on_cluster) {
     bind_rows(read_excel('~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx', sheet = "copy_number_variation"),
               read_excel('~/Desktop/Concordance/PSets/gene_drug_asociations.xlsx', sheet = "expression"))
 } else {
-  #individual_posteriors <- readRDS(file.path('~/concordance',
-  #                                           paste(comparison,'_fit_p60',sep=''),
-  #                                           'posterior.formatted.RDS'))
+  if (include_individual_posteriors) {
+    individual_posteriors <- readRDS(file.path('~/concordance',
+                                               paste(comparison,'_fit_p60',sep=''),
+                                               'posterior.formatted.RDS'))
+  }
   joint_posteriors <- readRDS(file.path('~/concordance',
                                         paste(comparison,'_fit_joint',sep=''),
                                         'posterior.formatted.RDS'))
@@ -57,12 +66,16 @@ if (!run_on_cluster) {
     bind_rows(read_excel('~/concordance/PSets/gene_drug_asociations.xlsx', sheet = "copy_number_variation"),
               read_excel('~/concordance/PSets/gene_drug_asociations.xlsx', sheet = "expression"))
 }
-#all_posteriors <- individual_posteriors %>% 
-#  mutate(Model_fit = 'individual') %>%
-#  bind_rows(joint_posteriors %>%
-#              mutate(Model_fit = 'joint'))
-all_posteriors <- joint_posteriors %>% mutate(Model_fit = 'joint')
-rm(individual_posteriors, joint_posteriors)
+if (include_individual_posteriors) {
+  all_posteriors <- individual_posteriors %>% 
+    mutate(Model_fit = 'individual') %>%
+    bind_rows(joint_posteriors %>%
+                mutate(Model_fit = 'joint'))
+  rm(individual_posteriors, joint_posteriors)
+} else {
+  all_posteriors <- joint_posteriors %>% mutate(Model_fit = 'joint')
+  rm(joint_posteriors)
+}
 gene_drug_asociations <- gene_drug_asociations %>%
   mutate(type=case_when(type=='expression' ~ 'rna',
                         type=='copy_number_variation' ~ 'cnv',
@@ -96,7 +109,10 @@ gene_drug_asociations <- gene_drug_asociations %>% filter(drug %in% all_drugs)
 
 Load gene names.
 ```{r}
-ensembl = biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+ensembl <- try(biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl"), silent=TRUE)
+if (class(ensembl) == 'try-error') {
+  ensembl = biomaRt::useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl",mirror='uswest')
+}
 chr_genes <- biomaRt::getBM(attributes=c('ensembl_gene_id','ensembl_transcript_id',
                                          'hgnc_symbol','entrezgene_id'), mart = ensembl) %>%
   as_tibble() %>% 
@@ -127,7 +143,7 @@ for (dataset in datasets) {
     gather(key='cell',value='value',-drug) %>%
     group_by(drug) %>%
     filter(!is.na(value)) %>%
-    #mutate(waterfall=PharmacoGx:::callingWaterfall(value,type='AUC')) %>%
+    mutate(waterfall=PharmacoGx:::callingWaterfall(value,type='AUC')) %>%
     ungroup() %>% 
     rename(auc_recomputed=value) %>%
     mutate(experiment = dataset)
@@ -221,16 +237,25 @@ for (dataset in datasets) {
     }
   }
   if (any.features.exist) {
-    rez[[dataset]] <- joined %>% inner_join(y_new_temp, by='cell')
+    rez[[dataset]] <- joined %>% inner_join(y_new_temp, by='cell') 
+  } else {
+    rez[[dataset]] <- y_new_temp
+  }
+  if (include_individual_posteriors) {
     rez[[dataset]] <- rez[[dataset]] %>%
-    inner_join(posterior %>% 
-               #filter(Model_fit == 'individual') %>% 
+      inner_join(posterior %>% 
+               filter(Model_fit == 'individual') %>% 
                select(-Model_fit) %>%
                distinct(),by=c('cell','experiment','drug')) %>% 
-  mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
-                               TRUE ~ 'resistant')) #%>%
-  #mutate(cell_type = case_when(posterior_probability_sensitive >= .99 ~ 'sensitive',
-#                               posterior_probability_sensitive <= .01 ~ 'resistant')) 
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                               TRUE ~ 'resistant')) 
+  } else {
+    rez[[dataset]] <- rez[[dataset]] %>%
+      inner_join(posterior %>% 
+             select(-Model_fit) %>%
+             distinct(),by=c('cell','experiment','drug')) %>% 
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                             TRUE ~ 'resistant')) 
   }
   eval(parse(text=paste('rm(',dataset,',tempPset, x_new, joined, y_new_temp)',sep='')))
 }
@@ -240,7 +265,7 @@ Fit models for varying outcome variables.
 ```{r}
 all_effect_sizes <- tibble()
 for (drug_for_biomarkers in all_drugs) {
-  #if (drug_for_biomarkers == 'Vorinostat') { browser()}
+  print(drug_for_biomarkers)
   naive_cutoff <- ifelse(drug_for_biomarkers %in% broad_drugs,.4,.2)
   for (study in names(rez)) {
     rez[[study]] <- rez[[study]][!(colSums(is.na(rez[[study]])) == nrow(rez[[study]]))]
@@ -248,9 +273,8 @@ for (drug_for_biomarkers in all_drugs) {
       na.omit() %>%
       filter(drug==drug_for_biomarkers) %>%
       mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant'))
-    for (depVar in c('auc_recomputed')) {
-    #(depVar in c('auc_recomputed','posterior_probability_sensitive')) {
-         #c('waterfall','naive','auc_recomputed','posterior_probability_sensitive','cell_type')) {
+    if (nrow(ourData)==0) {next()}
+    for (depVar in individual_study_measures) {
       if (depVar == 'waterfall') { 
         ourData <- ourData %>% filter(waterfall!='intermediate')
       }
@@ -262,6 +286,7 @@ for (drug_for_biomarkers in all_drugs) {
                -posterior_probability_sensitive) %>%
         mutate_all(as.numeric) %>%
         t() 
+      if (nrow(expr_data) == 0) {next()}
       expr_data <- expr_data[!duplicated(rownames(expr_data)),]
       colnames(expr_data) <- pull(ourData %>% select(cell))
       
@@ -276,6 +301,7 @@ for (drug_for_biomarkers in all_drugs) {
         mutate(symbol = ifelse(is.na(hgnc_symbol),Feature, hgnc_symbol)) %>%
         mutate(type = ifelse(is.na(extra2),extra1, extra2)) %>%
         select(Full_Feature, symbol, Feature, type, entrezgene_id) %>%
+        distinct(Full_Feature, .keep_all=TRUE) %>%
         column_to_rownames('Full_Feature') %>%
         Biobase::AnnotatedDataFrame()
       
@@ -283,6 +309,7 @@ for (drug_for_biomarkers in all_drugs) {
       tmp <- ourData %>% 
         select(cell, depVar) %>% 
         rename(Sensitivity= depVar) %>%
+        distinct(Cell, .keep_all=TRUE) %>%
         column_to_rownames('cell')
       if (depVar %in% c('waterfall','naive','cell_type')) {
         tmp$Sensitivity <- as.factor(as.character(tmp$Sensitivity))
@@ -316,36 +343,74 @@ for (drug_for_biomarkers in all_drugs) {
 Same thing for the joint posterior.
 ```{r}
 for (drug_for_biomarkers in all_drugs) {
+  print(drug_for_biomarkers)
   naive_cutoff <- ifelse(drug_for_biomarkers %in% broad_drugs,.4,.2)
-  ourData <- do.call(bind_rows, rez) %>% 
-    ungroup() %>%
-    select(-experiment, -cell_type, -posterior_probability_sensitive) %>%
-    filter(drug==drug_for_biomarkers) %>%
-    group_by(cell, drug) %>%
-    mutate_at(vars(-group_cols()), as.numeric) %>%
-    summarise_all(mean, na.rm = TRUE) %>%
-    ungroup() %>%
-    na.omit() %>%
-    inner_join(posterior %>% 
-                 filter(Model_fit == 'joint',drug==drug_for_biomarkers) %>%
-                 select(-Model_fit, -experiment) %>%
-                 distinct(), by=c('cell','drug')) %>%
-    distinct() %>%
-    mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
-    mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
-                               TRUE ~ 'resistant'))# %>%
-    #mutate(cell_type = case_when(posterior_probability_sensitive >= .99 ~ 'sensitive',
-    #                           posterior_probability_sensitive <= .01 ~ 'resistant'))
-    group_by(cell) %>%
-    mutate(rownum = row_number()) %>%
-    mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
-    ungroup() %>%
-    unite(cell, cell,rownum,sep='') 
-  for (depVar in c('auc_recomputed','posterior_probability_sensitive', 'cell_type')) {
-       #c('naive','auc_recomputed','posterior_probability_sensitive','cell_type')) {
+  if (mean_common_cells) {
+    experi_data <- posterior %>% 
+      distinct(cell, experiment) %>% 
+      mutate(experiment2=experiment) %>%
+      spread(experiment,experiment2) %>%
+      replace(is.na(.), '') %>% 
+      group_by(cell) %>%
+      mutate_at(vars(-group_cols()), funs(paste(.,'_', sep=''))) %>%
+      ungroup() %>%
+      mutate_all(funs(case_when(.=='_' ~ '', TRUE~.))) %>%
+      unite(experiment, CCLE, CTRPv2, FIMM, gCSI, GDSC1000, sep='') %>%
+      mutate(experiment = substr(experiment, 1, nchar(experiment)-1))
+    ourData <- do.call(bind_rows, rez) %>% 
+      ungroup() %>%
+      select(-experiment, -cell_type, -posterior_probability_sensitive) %>%
+      filter(drug==drug_for_biomarkers) %>%
+      group_by(cell, drug) %>%
+      mutate_at(vars(-group_cols()), as.numeric) %>%
+      summarise_all(mean, na.rm = TRUE) %>%
+      ungroup() %>%
+      na.omit() %>%
+      inner_join(posterior %>% 
+                   filter(Model_fit == 'joint',drug==drug_for_biomarkers) %>%
+                   select(-Model_fit, -experiment) %>%
+                   distinct(), by=c('cell','drug')) %>%
+      distinct() %>%
+      mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                                 TRUE ~ 'resistant')) %>%
+      group_by(cell) %>%
+      mutate(rownum = row_number()) %>%
+      mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
+      ungroup() %>%
+      unite(cell, cell,rownum,sep='') %>%
+      left_join(experi_data, by='cell')
+  } else {
+    ourData <- do.call(bind_rows, rez) %>% 
+      ungroup() %>%
+      select(-experiment, -cell_type, -posterior_probability_sensitive, -auc_recomputed) %>%
+      filter(drug==drug_for_biomarkers) %>%
+      group_by(cell, drug) %>%
+      mutate_at(vars(-group_cols()), as.numeric) %>%
+      summarise_all(mean, na.rm = TRUE) %>%
+      ungroup() %>%
+      right_join(do.call(bind_rows, rez) %>% 
+                   select(cell, drug, experiment, auc_recomputed) %>%
+                   filter(drug==drug_for_biomarkers), by=c('cell','drug')) %>%
+      na.omit() %>%
+      inner_join(posterior %>% 
+                   filter(Model_fit == 'joint',drug==drug_for_biomarkers) %>%
+                   select(-Model_fit) %>%
+                   distinct(), by=c('cell','drug', 'experiment')) %>%
+      distinct() %>%
+      mutate(naive = ifelse(auc_recomputed>naive_cutoff,'sensitive','resistant')) %>%
+      mutate(cell_type = case_when(posterior_probability_sensitive > min_posterior_probability_sensitive ~ 'sensitive',
+                                 TRUE ~ 'resistant')) %>%
+      group_by(cell) %>%
+      mutate(rownum = row_number()) %>%
+      mutate(rownum = ifelse(rownum>1,paste('_',rownum,sep=''),'')) %>%
+      ungroup() %>%
+      unite(cell, cell,rownum,sep='') 
+  }
+  for (depVar in joint_study_measures) {
     # gather expression data
     expr_data <- ourData %>% 
-      select(-drug, -cell, 
+      select(-drug, -cell, -experiment,
              -auc_recomputed, -naive, -cell_type, 
              -posterior_probability_sensitive) %>% 
       mutate_all(as.numeric) %>%
@@ -364,6 +429,7 @@ for (drug_for_biomarkers in all_drugs) {
       mutate(symbol = ifelse(is.na(hgnc_symbol),Feature, hgnc_symbol)) %>%
       mutate(type = ifelse(is.na(extra2),extra1, extra2)) %>%
       select(Full_Feature, symbol, Feature, type,entrezgene_id) %>%
+      distinct(Full_Feature, .keep_all=TRUE) %>%
       column_to_rownames('Full_Feature') %>%
       Biobase::AnnotatedDataFrame()
     
@@ -381,7 +447,7 @@ for (drug_for_biomarkers in all_drugs) {
     tmp <- ourData %>% 
       select(cell, depVar) %>% 
       rename(Sensitivity= depVar) %>%
-      distinct() %>%
+      distinct(cell, .keep_all=TRUE) %>%
       column_to_rownames('cell')
     if (depVar %in% c('naive','cell_type')) {
       tmp$Sensitivity <- as.factor(as.character(tmp$Sensitivity))

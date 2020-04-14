@@ -22,13 +22,18 @@ base_path <- file.path('~/Desktop/Concordance/results/CCLE_GDSC_fit_p60/auc_reco
 drugs <- c('17AAG','AZD0530','AZD6244','Crizotinib','Erlotinib','lapatinib','Nilotinib','Nutlin3','paclitaxel',
            'PD0325901','PD0332991','PHA665752','PLX4720','Sorafenib','TAE684')
 for (drug in drugs) {
-  p_main <- readRDS(file.path(base_path,'CCLE_GDSC','by_drug',paste(drug,'_posterior_CCLE_GDSC.RDS',sep=''))) + 
+  p_main <- readRDS(file.path(base_path,'CCLE_GDSC','by_drug',paste(drug,'_posterior_CCLE_GDSC.RDS',sep=''))) 
+  #p_main$data$agreement <- 1
+  p_main <- p_main + 
     scale_colour_gradient2(midpoint=.5,limits = c(0,1),mid='grey50',breaks=c(0,0.5,1),labels=c(0,0.5,1)) + 
     theme(legend.position = c(.1,.65), 
           plot.title=element_blank()) + 
+    #theme(legend.position='none') + 
     theme(axis.title = element_text(size = 14),
           axis.text = element_text(size = 12))
-  p_top <- readRDS(file.path(base_path,'CCLE','fitted_densities_by_drug',paste(drug,'.RDS',sep=''))) + 
+  p_top <- readRDS(file.path(base_path,'CCLE','fitted_densities_by_drug',paste(drug,'.RDS',sep=''))) 
+  p_top$layers <- rev(p_top$layers)
+  p_top <- p_top + 
     theme(plot.title=element_blank(),
           axis.title = element_blank(),
           axis.text = element_blank(),
@@ -38,7 +43,9 @@ for (drug in drugs) {
       scale_color_brewer(palette = 'Dark2') + 
     scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
     scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density')
-  p_side <- readRDS(file.path(base_path,'GDSC','fitted_densities_by_drug',paste(drug,'.RDS',sep=''))) + 
+  p_side <- readRDS(file.path(base_path,'GDSC','fitted_densities_by_drug',paste(drug,'.RDS',sep='')))
+  p_side$layers <- rev(p_side$layers)
+  p_side <- p_side + 
     theme(plot.title=element_blank(),
           axis.title = element_blank(),
           axis.text = element_blank(),
@@ -49,15 +56,35 @@ for (drug in drugs) {
     scale_x_continuous(breaks=c(0,.5,1),labels=c('0','0.5','1'),limits = c(0,1)) +
     scale_y_continuous(breaks=c(0,1),labels=c('0','1'),limits = c(0,1), name='Density') +
     ggpubr::rotate() 
+  if (drug == 'Erlotinib') {
+    tempdat <- p_top$data %>% filter(value>=.25) 
+    p_top <- p_top + 
+      scale_x_continuous(breaks = pull(tempdat,value)) +
+      theme(axis.ticks.x = element_line(size = 1))
+    tempdat <- p_side$data %>% filter(value>=.25) 
+    p_side <- p_side + 
+      scale_x_continuous(breaks = pull(tempdat,value)) +
+      theme(axis.ticks.y = element_line(size = 1))
+      
+  }
   
-  cell_ty <- p_top$layers[[2]]$data %>% distinct(cell_type) %>% pull()
-  if ('sensitive' %in% cell_ty & drug!='AZD6244') {
-    p_top$layers[[2]]$data <- p_top$layers[[2]]$data %>% 
+  cell_ty <- p_top$layers[[1]]$data %>% distinct(cell_type) %>% pull()
+  if ('sensitive' %in% cell_ty & drug=='Crizotinib') {
+    p_top$layers[[1]]$data <- p_top$layers[[1]]$data %>% 
+      mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*5, beta_curve))
+  }
+  cell_ty <- p_side$layers[[1]]$data %>% distinct(cell_type) %>% pull()
+  if ('sensitive' %in% cell_ty & drug=='Crizotinib') {
+    p_side$layers[[1]]$data <- p_side$layers[[1]]$data %>% 
+      mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*5, beta_curve)) 
+  }
+  if ('sensitive' %in% cell_ty & drug=='Nilotinib') {
+    p_top$layers[[1]]$data <- p_top$layers[[1]]$data %>% 
       mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve))
   }
-  cell_ty <- p_side$layers[[2]]$data %>% distinct(cell_type) %>% pull()
-  if ('sensitive' %in% cell_ty) {
-    p_side$layers[[2]]$data <- p_side$layers[[2]]$data %>% 
+  cell_ty <- p_side$layers[[1]]$data %>% distinct(cell_type) %>% pull()
+  if ('sensitive' %in% cell_ty & drug=='Nilotinib') {
+    p_side$layers[[1]]$data <- p_side$layers[[1]]$data %>% 
       mutate(beta_curve = ifelse(cell_type == 'sensitive',beta_curve*10, beta_curve)) 
   }
   
