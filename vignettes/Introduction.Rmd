@@ -270,7 +270,7 @@ Run EM.
     cell_assignments <- cell_assignments_list[[num]]
     targeted_priors <- targeted_drug_priors[[num]]
     broad_priors <- broad_drug_priors[[num]]
-    iterations_list[[num]] <- accumulate(1:25, iterate_em, .init = list(drug_assignments = drug_assignments,
+    iterations_list[[num]] <- accumulate(1:5, iterate_em, .init = list(drug_assignments = drug_assignments,
                                                                        cell_assignments = cell_assignments,
                                                                        targeted_priors = targeted_priors,
                                                                        broad_priors = broad_priors))
