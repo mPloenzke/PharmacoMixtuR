@@ -4,8 +4,7 @@
 \alias{calcBetaMixture}
 \title{Wrapper to calculate beta mixture model}
 \usage{
-calcBetaMixture(sensitivity.tibb, drug.names = NULL,
-  prior_proportion = 0.8)
+calcBetaMixture(sensitivity.tibb, drug.names = NULL, prior_proportion = 0.8)
 }
 \arguments{
 \item{drug.names}{List of drugs to fit model to}

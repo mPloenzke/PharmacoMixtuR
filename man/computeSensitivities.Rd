@@ -4,8 +4,7 @@
 \alias{computeSensitivities}
 \title{Wrapper to calculate and return a sensitivity profile}
 \usage{
-computeSensitivities(common, sensitivity_measure,
-  truncateViabilities = TRUE)
+computeSensitivities(common, sensitivity_measure, truncateViabilities = TRUE)
 }
 \arguments{
 \item{common}{List of \code{PSets}}

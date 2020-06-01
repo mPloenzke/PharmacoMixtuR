@@ -4,10 +4,15 @@
 \alias{intersectPSetWrapper}
 \title{Wrapper to intersect PSets}
 \usage{
-intersectPSetWrapper(datasets, minimum_intersection = 1,
+intersectPSetWrapper(
+  datasets,
+  minimum_intersection = 1,
   intersectOn = c("cell.lines", "drugs"),
-  sensitivity_measure = "auc_recomputed", remove_noisy_curves = FALSE,
-  remove_mislabelled_cells = FALSE, mislabelled_cells = NULL)
+  sensitivity_measure = "auc_recomputed",
+  remove_noisy_curves = FALSE,
+  remove_mislabelled_cells = FALSE,
+  mislabelled_cells = NULL
+)
 }
 \arguments{
 \item{datasets}{Vector of datasets to calculate intersections among}

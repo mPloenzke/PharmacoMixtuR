@@ -4,8 +4,12 @@
 \alias{calcMixture}
 \title{Wrapper to calculate sensitivity profile}
 \usage{
-calcMixture(sensitivity.tibb, drug.names = NULL,
-  prior_proportion = 0.8, sd_na_val = 0.02)
+calcMixture(
+  sensitivity.tibb,
+  drug.names = NULL,
+  prior_proportion = 0.8,
+  sd_na_val = 0.02
+)
 }
 \arguments{
 \item{drug.names}{List of drugs to fit model to}

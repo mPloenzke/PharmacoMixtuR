@@ -4,7 +4,7 @@
 \alias{iterate_em}
 \title{Wrapper to calculate beta mixture model}
 \usage{
-iterate_em(state, ...)
+iterate_em(state, ..., last = FALSE)
 }
 \arguments{
 \item{state}{}

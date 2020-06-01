@@ -120,3 +120,39 @@ fit_beta_mle <- function(x) {
   }
   data_frame(alpha = ab[1], beta = ab[2], number = length(x))
 }
+#' Wrapper to calculate sensitivity profile
+#'
+#' A wrapper to return the sensitivity information for the
+#' intersected PSets across cells and drugs.
+#'
+#' @param x Observed value 
+#'
+#' @return List of parameter estimates
+#'
+#' @export
+#'
+#' @author Matthew Ploenzke, \email{ploenzke@@g.harvard.edu}
+#' @seealso \code{\link{iterate_em}} \code{\link{fit_bb_mle}}
+#' @keywords normal mle
+#'
+#' @importFrom stats dnorm
+#' @importFrom stats4 mle coef
+fit_normal_mle <- function(x) {
+
+  ll <- function(mu, sigma) {
+    -sum(dnorm(x2, mu, sigma, log = TRUE))
+  }
+  if (length(x) == 1) {
+    x2 <- c(x, x+rnorm(1,0,sd=.05))
+  } else {
+    x2 <- x
+  }
+  m <- try(stats4::mle(ll, start = list(mu = 0, sigma = 1), method = "L-BFGS-B",
+                       lower = c(-100, .001)),silent=TRUE)
+  if (class(m) == "try-error") {
+    ab <- c(0,1)
+  } else {
+    ab <- stats4::coef(m)
+  }
+  data_frame(mu = ab[1], sigma = ab[2], number = length(x))
+}
