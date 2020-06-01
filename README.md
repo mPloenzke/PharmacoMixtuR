@@ -17,6 +17,4 @@ devtools::install_github("mPloenzke/PharmacoMixtuR")
 ## Getting Started
 
 To get started, please read the intro vignettes:
-`vignette("plot_DoseResponse_Curves", package = "PharmacoMixtuR")`,
-`vignette("corr_v_OR", package = "PharmacoMixtuR")`,
-`vignette("calculate_Posterior", package = "PharmacoMixtuR")`.
+`vignette("Introduction", package = "PharmacoMixtuR")`.
