@@ -24,7 +24,7 @@ Set options.
   opt$datasets <- c('CCLE','GDSC') # CCLE GDSC GDSC1000 gCSI FIMM CTRPv2
   opt$min_intersection <- 2 # Minimum number of studies a drug/cell must be assayed in to be included in the intersection comparison
   opt$log_dir <- paste(paste(opt$datasets,collapse='_'),'fit_p60',sep='_')
-  opt$sensitivity_measure <- c('auc_recomputed') # raw_auc e_inf hill_slope ec50 auc_recomputed
+  opt$sensitivity_measure <- 'auc_recomputed' # raw_auc e_inf hill_slope ec50 auc_recomputed
   # Prior specifications denoting cell sensitivity and proportion of drugs broadly-active:
   opt$prior.sensitive <- .6 # .3 # prior specification denoting cell is sensitive if greater than this value
   opt$prior.broadly.active <- 'median_mad' #median .05 # prior specification denoting drug is broadly-active if probability cell is sensitive is greater than value
@@ -38,8 +38,12 @@ Set up log directory.
 
 Load data.
 ```{r}
-    CCLE <- PharmacoGx::CCLEsmall
-    GDSC <- PharmacoGx::GDSCsmall
+library(PharmacoGx)
+data(CCLEsmall)
+data(GDSCsmall)
+CCLE <- CCLEsmall
+GDSC <- GDSCsmall
+rm(CCLEsmall, GDSCsmall)
 ```
 
 Format the sensitivity data for each experiment. Find cells and drugs assayed across experiment. Remove noisy experiments and mislabelled cell lines. Calculate sensitivity measures per cell/drug.
