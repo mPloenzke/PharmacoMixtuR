@@ -1,0 +1,31 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-"
+)
+```
+
+# PharmacoMixtuR
+
+[PharmacoMixtuR](https://github.com/mPloenzke/PharmacoMixtuR) 
+
+## Installation
+
+Begin by installing PharmacoMixtuR from github with:
+
+```{r gh-installation, eval = FALSE}
+# install.packages("devtools")
+devtools::install_github("mPloenzke/PharmacoMixtuR")
+```
+
+## Getting Started
+
+To get started, please read the intro vignettes: `vignette("Introduction", package = "PharmacoMixtuR")`.
+
