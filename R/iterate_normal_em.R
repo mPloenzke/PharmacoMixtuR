@@ -1,4 +1,4 @@
-#' Wrapper to calculate beta mixture model
+#' Wrapper to calculate normal mixture model
 #'
 #' A wrapper to return the sensitivity information for the
 #' intersected PSets across cells and drugs.
@@ -11,20 +11,19 @@
 #'
 #' @author Matthew Ploenzke, \email{ploenzke@@g.harvard.edu}
 #' @seealso \code{\link{intersectPSetWrapper}}
-#' @keywords fit_bb_mle fit_beta_mle
+#' @keywords fit_bb_mle fit_normal_mle
 #'
 #' @importFrom magrittr %>%
 #' @importFrom VGAM dbetabinom.ab
 #' @importFrom dplyr group_by do mutate ungroup select top_n n_distinct left_join filter bind_rows
 #' @importFrom tidyr crossing
-#' @importFrom stats qbeta
-iterate_em <- function(state, ..., last=FALSE) {
+#' @importFrom stats qnorm
+iterate_normal_em <- function(state, ..., last=FALSE) {
   # M-step for drug-specific parameters (targetted)
   targetted_drug_fits_temp <- state$cell_assignments %>% 
-    mutate(value = case_when(value<1e-3 ~  1e-3, TRUE ~ value)) %>%
     mutate(drug_type = 'targeted') %>%
     group_by(drug, cell_type, drug_type, experiment) %>% 
-    do(mutate(fit_beta_mle(.$value),number = nrow(.))) %>% 
+    do(mutate(fit_normal_mle(.$value),number = nrow(.))) %>% 
     group_by(drug, experiment) %>%
     mutate(ndist=n_distinct(cell_type)) %>%
     ungroup()
@@ -49,10 +48,10 @@ iterate_em <- function(state, ..., last=FALSE) {
         mutate(cell_type2 = case_when(cell_type=='resistant' ~ 'sensitive',cell_type=='sensitive' ~ 'resistant'),
                cell_type=cell_type2,
                number=0,
-               alpha=case_when(cell_type == 'resistant' ~ 1.5,
-                               cell_type == 'sensitive' ~ 50),
-               beta=case_when(cell_type == 'resistant' ~ 7.5,
-                              cell_type == 'sensitive' ~ 50)) %>%
+               mu=case_when(cell_type == 'resistant' ~ 0,
+                               cell_type == 'sensitive' ~ 5),
+               sigma=case_when(cell_type == 'resistant' ~ 1,
+                              cell_type == 'sensitive' ~ 1)) %>%
         select(-cell_type2)
     ) %>%
     select(-ndist, -number) %>%
@@ -60,10 +59,9 @@ iterate_em <- function(state, ..., last=FALSE) {
   
   # M-step for drug-specific parameters (broad)
   broad_drug_fits <- state$cell_assignments %>%
-    mutate(x=ifelse(value<1e-3,1e-3,value)) %>%
     mutate(drug_type = 'broad') %>%
     group_by(drug, drug_type, experiment) %>%
-    do(mutate(fit_beta_mle(.$x),number = nrow(.))) %>%
+    do(mutate(fit_normal_mle(.$value),number = nrow(.))) %>%
     ungroup()  %>% 
     select(-number) %>%
     left_join(state$cell_assignments %>% select(drug, experiment, broad_cell_type_prior) %>% distinct(), by=c('drug','experiment'))
@@ -75,12 +73,11 @@ iterate_em <- function(state, ..., last=FALSE) {
       filter(drug == dr) %>% 
       select(drug:measure) %>%
       mutate(drug_type='targeted') %>%
-      mutate(value=ifelse(value<1e-3,1e-3,value)) %>%
       crossing(targetted_drug_fits %>% filter(drug == dr) %>% select(-drug, -drug_type) %>% rename(experiment1=experiment)) %>% 
       filter(experiment==experiment1) %>% 
       select(-experiment1) %>% 
-      mutate(median = qbeta(.5,alpha,beta),
-             likelihood = dbeta(value, alpha, beta)) %>% 
+      mutate(median = qnorm(.5,mu,sigma),
+             likelihood = dnorm(value, mu, sigma)) %>% 
       group_by(cell_type) %>%
       mutate(max.likelihood=max(likelihood)) %>%
       ungroup() %>%
@@ -104,15 +101,14 @@ iterate_em <- function(state, ..., last=FALSE) {
     filter(drug %in% broad_drug_list) %>%
     select(drug:measure) %>%
     mutate(drug_type='broad') %>%  
-    mutate(value=ifelse(value<1e-3,1e-3,value)) %>%
     left_join(broad_drug_fits, by=c('drug','drug_type','experiment')) %>%
-    mutate(likelihood = 1 * dbeta(value, alpha, beta),
-           cell_type = ifelse((broad_cell_type_prior*pbeta(value, alpha, beta)) >
-                                ((1-broad_cell_type_prior)*(1-pbeta(value, alpha, beta))),
+    mutate(likelihood = 1 * dnorm(value, mu, sigma),
+           cell_type = ifelse((broad_cell_type_prior*pnorm(value, mu, sigma)) >
+                                ((1-broad_cell_type_prior)*(1-pnorm(value, mu, sigma))),
                               'sensitive','resistant'),
-           posterior = pbeta(value, alpha, beta,lower.tail = FALSE),
+           posterior = pnorm(value, mu, sigma,lower.tail = FALSE),
            #posterior = (broad_cell_type_prior*pbeta(value, alpha, beta)) +
-          #   ((1-broad_cell_type_prior)*(1-pbeta(value, alpha, beta))), 
+           #   ((1-broad_cell_type_prior)*(1-pbeta(value, alpha, beta))), 
            posterior = 1-posterior)
   
   # Format all cell assignments
@@ -181,8 +177,8 @@ iterate_em <- function(state, ..., last=FALSE) {
       ungroup()
     
     drug_fits <- targetted_drug_fits %>%
-      select(drug, drug_type, cell_type, experiment, alpha, beta) %>%
-      bind_rows(broad_drug_fits %>% select(drug, drug_type, experiment, alpha, beta) %>% mutate(cell_type = 'resistant')) %>%
+      select(drug, drug_type, cell_type, experiment, mu, sigma) %>%
+      bind_rows(broad_drug_fits %>% select(drug, drug_type, experiment, mu,sigma) %>% mutate(cell_type = 'resistant')) %>%
       right_join(drug_assignments %>% select(drug, drug_type), by=c('drug','drug_type'))
   } else {
     drug_assignments <- drugs.tibble %>% 
@@ -196,8 +192,8 @@ iterate_em <- function(state, ..., last=FALSE) {
     #if (drug_assignments %>% filter(drug=='Crizotinib') %>% distinct(drug_type) %>% pull() == 'broad') {browser()}
     
     drug_fits <- targetted_drug_fits %>%
-      select(drug, drug_type, cell_type, experiment, alpha, beta) %>%
-      bind_rows(broad_drug_fits %>% select(drug, drug_type, experiment, alpha, beta) %>% mutate(cell_type = 'resistant')) %>%
+      select(drug, drug_type, cell_type, experiment, mu, sigma) %>%
+      bind_rows(broad_drug_fits %>% select(drug, drug_type, experiment, mu, sigma) %>% mutate(cell_type = 'resistant')) %>%
       right_join(drug_assignments %>% select(drug, drug_type), by=c('drug','drug_type'))
   }
   
