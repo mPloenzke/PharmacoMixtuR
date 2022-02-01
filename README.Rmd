@@ -27,5 +27,5 @@ devtools::install_github("mPloenzke/PharmacoMixtuR")
 
 ## Getting Started
 
-To get started, please read the intro vignettes: `vignette("Introduction", package = "PharmacoMixtuR")`.
+To get started, please see this repository: [BIOSTS-21302](https://github.com/mPloenzke/BIOSTS-21302_scripts) `.
 
